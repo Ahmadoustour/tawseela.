@@ -1,0 +1,34 @@
+# أدوات API والتعامل مع الشبكة
+requests
+tweepy
+python-telegram-bot==20.7
+telethon
+
+# Binance
+python-binance
+
+# التحليل الفني
+ta
+xgboost
+
+# أدوات تحليل البيانات
+pandas
+numpy
+scipy
+joblib
+
+# تحليل النصوص
+textblob
+beautifulsoup4
+
+# أدوات Machine Learning
+scikit-learn
+
+# جدولة المهام
+schedule
+
+# التعامل مع .env
+python-dotenv
+
+# مكتبة العطل الرسمية
+holidays
