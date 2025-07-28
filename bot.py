@@ -1,10 +1,10 @@
 import os
+import hashlib
 import time
 import schedule
 import requests
 import pandas as pd
 import numpy as np
-import tweepy
 import json
 import joblib
 import threading
@@ -17,13 +17,14 @@ import traceback
 import platform
 import psutil
 import holidays
+import sklearn
 from logging.handlers import RotatingFileHandler
 from datetime import datetime, timedelta, time
 from binance.client import Client
-from telegram import Bot, InlineKeyboardButton, InlineKeyboardMarkup
+from binance.exceptions import BinanceAPIException
+from telegram import Bot
 from telegram.constants import ParseMode
 from telethon.sync import TelegramClient
-from telethon.tl.functions.messages import GetHistoryRequest
 from dotenv import load_dotenv
 from ta.trend import EMAIndicator, ADXIndicator, MACD
 from ta.momentum import RSIIndicator
@@ -34,12 +35,11 @@ from textblob import TextBlob
 from sklearn.pipeline import Pipeline
 from sklearn.preprocessing import StandardScaler
 from threading import Lock
-from scipy.stats import zscore
-from sklearn.metrics import accuracy_score, precision_score, recall_score, classification_report
+from sklearn.metrics import accuracy_score, precision_score, recall_score
 from concurrent.futures import ThreadPoolExecutor
 from telegram.error import NetworkError
-from sklearn.model_selection import train_test_split, GridSearchCV
-from collections import defaultdict, OrderedDict
+from sklearn.model_selection import train_test_split, GridSearchCV, TimeSeriesSplit
+from collections import OrderedDict
 # تحميل المتغيرات البيئية
 load_dotenv()
 
@@ -116,62 +116,142 @@ class TradingBot:
             self.client = Client(os.getenv('BINANCE_API_KEY'), os.getenv('BINANCE_SECRET_KEY'))
             self.tg_bot = Bot(token=os.getenv('TELEGRAM_TOKEN'))
         except Exception as e:
-            self.logger.critical(f"فشل تهيئة APIs - الخطأ: {str(e)}", exc_info=True)
+            self.logger.critical("فشل تهيئة APIs - الخطأ: %s", str(e), exc_info=True)
             self.send_notification(
                 'error',
-                f"🔥 فشل حرج في تهيئة APIs\n"
-                f"📛 التفاصيل: {str(e)}\n"
-                f"⏰ الوقت: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"
+                "🔥 فشل حرج في تهيئة APIs\n"
+                "📛 التفاصيل: %s\n"
+                "⏰ الوقت: %s" % (str(e), datetime.now().strftime('%Y-%m-%d %H:%M:%S'))
             )
-            self.shutdown_bot(reason=f"فشل تهيئة APIs: {str(e)}")
-            raise RuntimeError(f"فشل تهيئة APIs - تم إيقاف البوت. الخطأ الأصلي: {str(e)}") from e
+            self.shutdown_bot(reason="فشل تهيئة APIs: %s" % str(e))
+            raise RuntimeError("فشل تهيئة APIs - تم إيقاف البوت. الخطأ الأصلي: %s" % str(e)) from e
 
         # تحميل الحالة العامة والمؤشرات
         self.load_state()
         self.load_rotation_index()
 
-        # تحميل النماذج لكل عملة
+        # تحميل النماذج لكل عملة مع نظام طوارئ متكامل
+        self.models = {}
         for symbol in self.symbols:
             try:
+                # 1. محاولة تحميل النموذج الرئيسي
                 model = self.load_or_initialize_model(symbol, use_cache=True)
-                if model is not None:
-                    # اختبار النموذج ببيانات وهمية
-                    dummy_input = pd.DataFrame([[
-                        0, 0, 50, 0, 1000000, 0, 0
-                    ]], columns=[
-                        'ema20', 'ema50', 'rsi', 'macd',
-                        'volume', 'news_sentiment', 'signal_count'
-                    ])
-                    model.predict(dummy_input)
+                
+                # 2. التحقق من صحة النموذج
+                if model is None:
+                    raise ValueError("النموذج غير محمل (قيمة None)")
+                
+                # 3. اختبار عملي للنموذج
+                test_data = pd.DataFrame([[
+                    0, 0, 50, 0, 1000000, 0, 0
+                ]], columns=[
+                    'ema20', 'ema50', 'rsi', 'macd',
+                    'volume', 'news_sentiment', 'signal_count'
+                ])
+                
+                prediction = model.predict(test_data)
+                if prediction is None or len(prediction) == 0:
+                    raise ValueError("فشل في توليد التنبؤات")
+                
+                # 4. إذا نجحت جميع الاختبارات
                 self.models[symbol] = model
+                self.logger.info("تم تحميل النموذج بنجاح لـ %s", symbol)
+                
             except Exception as e:
-                self.send_notification('error', f"❌ فشل تحميل النموذج لـ {symbol}: {e}")
-                self.models[symbol] = None
+                self.logger.error("فشل تحميل النموذج الرئيسي لـ %s: %s", symbol, str(e), exc_info=True)
+                
+                try:
+                    # 5. محاولة تحميل نسخة احتياطية
+                    backup_model = self._load_backup_model(symbol)
+                    if backup_model:
+                        self.models[symbol] = backup_model
+                        self.logger.warning("تم تحميل نسخة احتياطية لـ %s", symbol)
+                        continue
+                        
+                    # 6. إنشاء نموذج طوارئ بسيط
+                    self.models[symbol] = self._create_emergency_model()
+                    self.logger.critical("تم إنشاء نموذج طوارئ لـ %s", symbol)
+                    
+                    self.send_notification(
+                        'warning',
+                        "⚠️ تحذير: تم استخدام نموذج طوارئ لـ %s\n"
+                        "السبب: %s" % (symbol, str(e)[:150])
+                    )
+                    
+                except Exception as emergency_error:
+                    self.logger.critical(
+                        "فشل إنشاء نموذج طوارئ لـ %s: %s",
+                        symbol, str(emergency_error),
+                        exc_info=True
+                    )
+                    self.shutdown_bot(reason="فشل حرج في تحميل النماذج: %s" % str(emergency_error))
+                    raise RuntimeError("لا يمكن المتابعة بدون نموذج لـ %s" % symbol) from emergency_error
+
+    def initialize_fallback_model(self):
+        """إنشاء نموذج بديل أساسي في حال فشل التحميل"""
+        try:
+            model = Pipeline([
+                ('scaler', StandardScaler()),
+                ('xgb', XGBClassifier(
+                    objective='binary:logistic',
+                    learning_rate=0.05,
+                    max_depth=3,
+                    n_estimators=100,
+                    random_state=42
+                ))
+            ])
+            
+            # إنشاء بيانات تدريب وهمية أساسية
+            dummy_X = pd.DataFrame(np.random.rand(10, 7), columns=[
+                'ema20', 'ema50', 'rsi', 'macd',
+                'volume', 'news_sentiment', 'signal_count'
+            ])
+            dummy_y = np.random.randint(0, 2, 10)
+            
+            # تدريب سريع على بيانات وهمية
+            model.fit(dummy_X, dummy_y)
+            
+            return model
+            
+        except Exception as e:
+            self.logger.error("فشل إنشاء نموذج بديل: %s", str(e), exc_info=True)
+            raise RuntimeError("لا يمكن إنشاء نموذج بديل") from e
 
     def _init_logging(self):
-        """إعداد نظام تسجيل الأخطاء الآمن مع ضمانات متعددة"""
+        """إعداد نظام تسجيل الأخطاء الآمن مع تجنب التعارض في الملفات"""
         try:
             # 1. إنشاء مجلد اللوجات إذا لم يكن موجوداً
-            os.makedirs('logs', exist_ok=True)
+            logs_dir = 'logs'
+            os.makedirs(logs_dir, exist_ok=True)
 
-            # 2. إنشاء اسم فريد لل logger
-            logger_name = f'trading_bot_{datetime.now().strftime("%Y%m%d_%H%M%S")}'
+            # 2. إنشاء اسم فريد لل logger مع تجنب التعارض
+            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+            logger_name = f'trading_bot_{timestamp}'
+            
+            # 3. التحقق من عدم وجود ملف بنفس الاسم (حماية إضافية)
+            log_file = f'{logs_dir}/bot_{datetime.now().strftime("%Y%m%d")}.log'
+            counter = 1
+            while os.path.exists(log_file):
+                log_file = f'{logs_dir}/bot_{datetime.now().strftime("%Y%m%d")}_{counter}.log'
+                counter += 1
+
+            # 4. إنشاء logger جديد
             self.logger = logging.getLogger(logger_name)
             self.logger.setLevel(logging.DEBUG)
 
-            # 3. منع تكرار ال handlers
+            # 5. منع تكرار ال handlers
             if self.logger.hasHandlers():
                 self.logger.handlers.clear()
 
-            # 4. إنشاء formatter متقدم
+            # 6. إنشاء formatter متقدم
             formatter = logging.Formatter(
                 '%(asctime)s | %(levelname)-8s | %(name)s | %(message)s | Line:%(lineno)d',
                 datefmt='%Y-%m-%d %H:%M:%S'
             )
 
-            # 5. إنشاء file handler مع تدوير الملفات
+            # 7. إنشاء file handler مع تدوير الملفات
             file_handler = RotatingFileHandler(
-                f'logs/bot_{datetime.now().strftime("%Y%m%d")}.log',
+                log_file,
                 maxBytes=5*1024*1024,  # 5MB
                 backupCount=3,
                 encoding='utf-8'
@@ -179,18 +259,16 @@ class TradingBot:
             file_handler.setFormatter(formatter)
             self.logger.addHandler(file_handler)
 
-            # 6. إنشاء console handler للطوارئ
+            # 8. إنشاء console handler للطوارئ
             console_handler = logging.StreamHandler()
             console_handler.setFormatter(formatter)
             self.logger.addHandler(console_handler)
 
-            # 7. تسجيل بدء التشغيل
+            # 9. تسجيل بدء التشغيل
             self.logger.info("✅ تم تهيئة نظام التسجيل بنجاح")
 
         except Exception as e:
             """نظام الطوارئ عند فشل تهيئة نظام التسجيل"""
-
-            # 1. محاولة إنشاء logger طوارئ بأقصى درجات الأمان
             try:
                 # أ. تهيئة أساسيات logging
                 logging.basicConfig(
@@ -215,24 +293,8 @@ class TradingBot:
                 # د. تعيين logger الطوارئ للنظام
                 self.logger = emergency_logger
 
-                # هـ. إرسال تنبيه عاجل
-                try:
-                    self.send_notification(
-                        'system_failure',
-                        f"🔥 نظام التسجيل الرئيسي تعطل\n"
-                        f"🆘 تم تفعيل نظام الطوارئ\n"
-                        f"📛 الخطأ: {type(e).__name__}\n"
-                        f"⏰ {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"
-                    )
-                except Exception as notif_error:
-                    print(f"فشل إرسال تنبيه الطوارئ: {notif_error}")
-
             except Exception as nested_ex:
-                # 2. إذا فشل نظام الطوارئ نفسه
-                print(f"🔥🔥 فشل نظام الطوارئ: {nested_ex}")
-                print(f"🆘 الخطأ الأصلي: {e}")
-
-                # 3. أبسط حل كحماية أخيرة
+                # أبسط حل كحماية أخيرة
                 with open('crash_report.log', 'a', encoding='utf-8') as f:
                     f.write(f"[{datetime.now()}] SYSTEM COLLAPSE: {str(e)}\n")
                     f.write(f"[{datetime.now()}] EMERGENCY FAILURE: {str(nested_ex)}\n")
@@ -272,7 +334,7 @@ class TradingBot:
                 current_version = sklearn.__version__
                 model_version = model.__sklearn_version__
                 if model_version != current_version:
-                    self.logger.warning(f"⚠️ إصدار sklearn غير متطابق (النموذج: {model_version}، الحالي: {current_version})")
+                    self.logger.warning("⚠️ إصدار sklearn غير متطابق (النموذج: %s، الحالي: %s)", model_version, current_version)
 
             return model
 
@@ -281,9 +343,9 @@ class TradingBot:
             try:
                 corrupt_path = f"{path}.corrupt_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
                 shutil.move(path, corrupt_path)
-                self.logger.error(f"تم نقل النموذج التالف إلى: {corrupt_path}")
+                self.logger.error("تم نقل النموذج التالف إلى: %s", corrupt_path)
             except Exception as move_error:
-                self.logger.error(f"فشل نقل الملف التالف: {str(move_error)}")
+                self.logger.error("فشل نقل الملف التالف: %s", str(move_error))
 
             self.send_notification(
                 'error',
@@ -328,7 +390,7 @@ class TradingBot:
                 fixed_sources.append(clean_src)
 
             if problems:
-                self.logger.warning(f"مشاكل في المصادر: {', '.join(problems)}")
+                self.logger.warning("مشاكل في المصادر: %s", ', '.join(problems))
 
             if not fixed_sources:
                 self.news_sources = DEFAULT_SOURCES.copy()
@@ -339,16 +401,16 @@ class TradingBot:
                 for essential in ['twitter', 'telegram']:
                     if essential not in self.news_sources:
                         self.news_sources.append(essential)
-                        self.logger.info(f"أضيف مصدر أساسي: {essential}")
+                        self.logger.info("أضيف مصدر أساسي: %s", essential)
 
         except Exception as e:
-            self.logger.critical(f"فشل التحقق من المصادر: {str(e)}", exc_info=True)
+            self.logger.critical("فشل التحقق من المصادر: %s", str(e), exc_info=True)
             self.news_sources = DEFAULT_SOURCES.copy()
 
     def _log_reset(self, reason):
         """تسجيل تفاصيل إعادة التعيين"""
         msg = f"تم ضبط مصادر الأخبار. السبب: {reason} | المصادر الجديدة: {self.news_sources}"
-        self.logger.warning(msg)
+        self.logger.warning("%s", msg)
         self.send_notification('config_update', msg)
 
     def collect_market_data(self, symbol):  # <-- الدالة المعدّلة
@@ -403,55 +465,64 @@ class TradingBot:
             signals.extend(other_signals)
 
         except Exception as e:
-            self.logger.error(f"فشل جلب الإشارات لـ {symbol}: {str(e)}", exc_info=True)
+            self.logger.error("فشل جلب الإشارات لـ %s: %s", symbol, str(e), exc_info=True)
             self.send_notification('error', f"❌ فشل جلب إشارات {symbol}")
 
         return signals
 
-    def get_latest_crypto_news(self, hours=48):
+    def get_latest_crypto_news(self, symbol, hours=48):
         """
-        جمع أحدث أخبار الكريبتو من مصادر متعددة خلال الساعات المحددة
+        جمع أحدث أخبار الكريبتو من مصادر متعددة خلال الساعات المحددة لرمز معين
         """
         news_items = []
         cutoff_time = datetime.now() - timedelta(hours=hours)
-        
+
         # 1. أخبار من تويتر
         try:
             twitter_news = self._fetch_twitter_news(hours)
-            news_items.extend(twitter_news)
+            if twitter_news:
+                news_items.extend([
+                    item for item in twitter_news 
+                    if datetime.fromisoformat(item['time']) > cutoff_time
+                ])
         except Exception as e:
-            self.logger.error(f"فشل جلب أخبار تويتر: {str(e)}")
+            self.logger.error("فشل جلب أخبار تويتر: %s", str(e))
 
         # 2. أخبار من كوين ديسك
         try:
-            coindesk_news = self.scrape_coindesk_news()
-            news_items.extend([item for item in coindesk_news 
-                             if datetime.fromisoformat(item['time']) > cutoff_time])
+            coindesk_news = self.scrape_coindesk_news(symbol)
+            if coindesk_news:
+                news_items.extend([
+                    item for item in coindesk_news 
+                    if datetime.fromisoformat(item['time']) > cutoff_time
+                ])
         except Exception as e:
-            self.logger.error(f"فشل جلب أخبار كوين ديسك: {str(e)}")
+            self.logger.error("فشل جلب أخبار كوين ديسك: %s", str(e))
 
-        # 3. أخبار من كريبتو بانيك
+        # 3. أخبار من كريبتو بانيك (تحليل معنويات فقط، لا توجد أخبار مفصلة)
         try:
-            cryptopanic_news = self.scrape_cryptopanic_news()
-            news_items.extend([item for item in cryptopanic_news 
-                             if datetime.fromisoformat(item['time']) > cutoff_time])
+            self.scrape_cryptopanic_news(symbol)  # لا ترجع أخبار
         except Exception as e:
-            self.logger.error(f"فشل جلب أخبار كريبتو بانيك: {str(e)}")
+            self.logger.error("فشل جلب أخبار كريبتو بانيك: %s", str(e))
 
         # 4. أخبار من تليجرام
         try:
             telegram_news = self.scrape_telegram_news()
-            news_items.extend([item for item in telegram_news 
-                             if datetime.fromisoformat(item['time']) > cutoff_time])
+            if telegram_news:
+                news_items.extend([
+                    item for item in telegram_news 
+                    if datetime.fromisoformat(item['time']) > cutoff_time
+                ])
         except Exception as e:
-            self.logger.error(f"فشل جلب أخبار تليجرام: {str(e)}")
+            self.logger.error("فشل جلب أخبار تليجرام: %s", str(e))
 
         # ترتيب الأخبار حسب الأحدث
         news_items.sort(key=lambda x: datetime.fromisoformat(x['time']), reverse=True)
-        
+
         return news_items[:50]  # إرجاع آخر 50 خبر فقط
 
     def _fetch_twitter_signals(self, symbol):
+        """نسخة محسنة من دالة جلب إشارات التويتر بتحليل لغوي متقدم"""
         signals = []
         coin_name = symbol[:-4]  # إزالة USDT
         cutoff_time = datetime.now() - timedelta(hours=48)
@@ -462,35 +533,112 @@ class TradingBot:
                 tweets = self._get_user_tweets(username)
                 for tweet in tweets:
                     try:
-                        # تحويل التاريخ بشكل آمن مع دعم تنسيقات متعددة
                         tweet_time = self._safe_parse_date(tweet.get('created_at', ''))
-                        
-                        # إذا فشل تحويل التاريخ، نتخطى هذه التغريدة
-                        if tweet_time is None:
+                        if tweet_time is None or tweet_time < cutoff_time:
                             continue
                             
-                        # الفلترة حسب الوقت + شروط الإشارة
-                        if (tweet_time > cutoff_time and 
-                            coin_name.lower() in tweet.get('text', '').lower() and
-                            TextBlob(tweet.get('text', '')).sentiment.polarity > 0.1 and
-                            any(word in tweet.get('text', '').lower() for word in ['buy', 'long', 'bullish'])):
+                        tweet_text = tweet.get('text', '').lower()
+                        
+                        # 1. التحقق من ذكر العملة
+                        if coin_name.lower() not in tweet_text:
+                            continue
                             
+                        # 2. تحليل المشاعر المتقدم
+                        sentiment = self._advanced_sentiment_analysis(tweet_text)
+                        
+                        # 3. الكشف عن الإشارات الضمنية
+                        signal_type = self._detect_signal_type(tweet_text)
+                        
+                        if signal_type != 'neutral':
                             signals.append({
                                 'source': 'Twitter',
                                 'author': username,
                                 'text': tweet.get('text', '')[:200],
                                 'time': tweet_time.isoformat(),
-                                'sentiment': TextBlob(tweet.get('text', '')).sentiment.polarity
+                                'sentiment': sentiment,
+                                'signal_type': signal_type,
+                                'confidence': self._calculate_confidence(tweet_text)
                             })
                     except Exception as tweet_error:
-                        self.logger.warning(f"خطأ في معالجة تغريدة من {username}: {str(tweet_error)}")
+                        self.logger.warning("خطأ في معالجة تغريدة من %s: %s", username, str(tweet_error))
                         continue
                         
             except Exception as e:
-                self.logger.warning(f"فشل معالجة تغريدات {username}: {str(e)}")
+                self.logger.warning("فشل معالجة تغريدات %s: %s", username, str(e))
                 continue
 
         return signals
+
+    @staticmethod
+    def _advanced_sentiment_analysis(text):
+        """تحليل مشاعر متقدم باستخدام TextBlob مع تحسينات"""
+        analysis = TextBlob(text)
+        
+        # تحسين تحليل المشاعر للسياق المالي
+        financial_words = {
+            'bullish': 0.8,
+            'bearish': -0.8,
+            'pump': -0.5,
+            'dump': -0.7,
+            'moon': 0.9,
+            'rocket': 0.7,
+            'crash': -0.9,
+            'rally': 0.6
+        }
+        
+        # تعديل النتيجة بناء على المصطلحات المالية
+        for word, weight in financial_words.items():
+            if word in text:
+                # نعدل القيمة بحيث تبقى بين -1 و1
+                analysis.sentiment = analysis.sentiment._replace(
+                    polarity=min(1.0, max(-1.0, analysis.sentiment.polarity + weight * 0.3))
+                )
+        
+        return round(analysis.sentiment.polarity, 2)
+
+    @staticmethod
+    def _detect_signal_type(text):
+        """الكشف عن نوع الإشارة باستخدام تحليل سياقي"""
+        text = text.lower()
+        
+        # قوائم الكلمات الدالة
+        buy_signals = ['buy', 'long', 'bullish', 'accumulate', 'entry', 'moon', 'rocket']
+        sell_signals = ['sell', 'short', 'bearish', 'exit', 'dump', 'crash']
+        caution_signals = ['warning', 'caution', 'careful', 'volatile']
+        
+        # تحليل النص
+        buy_count = sum(text.count(word) for word in buy_signals)
+        sell_count = sum(text.count(word) for word in sell_signals)
+        caution_count = sum(text.count(word) for word in caution_signals)
+        
+        # تحديد نوع الإشارة
+        if buy_count > sell_count and buy_count > caution_count:
+            return 'buy'
+        elif sell_count > buy_count and sell_count > caution_count:
+            return 'sell'
+        elif caution_count > max(buy_count, sell_count):
+            return 'caution'
+        else:
+            return 'neutral'
+
+    @staticmethod
+    def _calculate_confidence(text):
+        """حساب ثقة الإشارة بناء على عوامل متعددة"""
+        factors = []
+
+        # 1. طول التغريدة
+        factors.append(min(1.0, len(text) / 100))
+
+        # 2. عدد المصطلحات الدالة
+        keywords = ['target', 'stop', 'resistance', 'support', 'breakout']
+        factors.append(min(1.0, sum(text.count(kw) for kw in keywords) / 3))
+
+        # 3. علامات الترقيم (العلامات القوية)
+        strong_punct = ['!', '🚀', '🔥', '📈', '📉']
+        factors.append(min(1.0, sum(text.count(p) for p in strong_punct) / 2))
+
+        # متوسط عوامل الثقة
+        return round(sum(factors) / len(factors), 2)
 
     def _safe_parse_date(self, date_str):
         """تحويل التاريخ بشكل آمن مع دعم تنسيقات متعددة"""
@@ -509,7 +657,7 @@ class TradingBot:
             except ValueError:
                 continue
                 
-        self.logger.warning(f"فشل تحويل التاريخ: {date_str} - لا يوجد تنسيق مطابق")
+        self.logger.warning("فشل تحويل التاريخ: %s - لا يوجد تنسيق مطابق", date_str)
         return None
 
     def _fetch_twitter_news(self, hours=48):  # جعل hours=48 افتراضيًا
@@ -547,7 +695,8 @@ class TradingBot:
         # ترتيب حسب الوقت (الأحدث أولاً)
         return sorted(unique_data, key=lambda x: x['time'], reverse=True)
 
-    def _get_twitter_api_v2(self):
+    @staticmethod
+    def _get_twitter_api_v2():
         """تهيئة اتصال Twitter API v2 باستخدام Bearer Token"""
         headers = {
             "Authorization": f"Bearer {os.getenv('TWITTER_BEARER_TOKEN')}",
@@ -602,7 +751,7 @@ class TradingBot:
             } for tweet in tweets_data.get('data', [])]
 
         except Exception as e:
-            self.logger.error(f"فشل جلب تغريدات {username}: {str(e)}")
+            self.logger.error("فشل جلب تغريدات %s: %s", username, str(e))
             return []
 
     def _fetch_telegram_signals(self, symbol):
@@ -644,16 +793,17 @@ class TradingBot:
                                 })
 
                     except Exception as e:
-                        self.logger.warning(f"فشل جلب رسائل {channel}: {str(e)}")
+                        self.logger.warning("فشل جلب رسائل %s: %s", channel, str(e))
                         continue
 
         except Exception as e:
-            self.logger.error(f"فشل جلب إشارات التليجرام: {str(e)}", exc_info=True)
+            self.logger.error("فشل جلب إشارات التليجرام: %s", str(e), exc_info=True)
             raise
 
         return signals
 
-    def _fetch_other_sources(self, symbol):
+    @staticmethod
+    def _fetch_other_sources(symbol):
         """جلب إشارات من مصادر أخرى (مثل منتديات، مواقع متخصصة)"""
         signals = []
 
@@ -688,7 +838,7 @@ class TradingBot:
                     time.sleep(1)
 
                 except Exception as e:
-                    self.logger.error(f"خطأ في الجدولة: {e}")
+                    self.logger.error("خطأ في الجدولة: %s", e)
                     time.sleep(5)
 
         # تشغيل الثريد
@@ -704,7 +854,7 @@ class TradingBot:
             try:
                 self.optimize_entry_conditions(symbol)
             except Exception as sym_error:
-                self.logger.error(f"فشل تحسين {symbol}: {str(sym_error)}", exc_info=True)
+                self.logger.error("فشل تحسين %s: %s", symbol, str(sym_error), exc_info=True)
         self.logger.info("اكتمال عملية التحسين الأسبوعي")
     
     def analyze_news_sentiment(self, symbol=None):
@@ -733,7 +883,7 @@ class TradingBot:
                             total_score += sentiment
                             count += 1
                 except Exception as e:
-                    self.logger.error(f"NewsAPI Error: {str(e)}", exc_info=True)
+                    self.logger.error("NewsAPI Error: %s", str(e), exc_info=True)
 
             # 2. أخبار من CryptoPanic
             if 'cryptopanic' in self.news_sources:
@@ -750,7 +900,7 @@ class TradingBot:
                             total_score += sentiment
                             count += 1
                 except Exception as e:
-                    self.logger.error(f"CryptoPanic Error: {str(e)}", exc_info=True)
+                    self.logger.error("CryptoPanic Error: %s", str(e), exc_info=True)
 
             # 3. حساب النتيجة النهائية
             final_score = total_score / max(1, count)
@@ -769,7 +919,7 @@ class TradingBot:
             return round(final_score, 4)
 
         except Exception as e:
-            self.logger.critical(f"Total Sentiment Analysis Failure: {str(e)}", exc_info=True)
+            self.logger.critical("Total Sentiment Analysis Failure: %s", str(e), exc_info=True)
             return 0.0
 
     def scrape_cryptopanic_news(self, symbol, cache_hours=4):
@@ -781,7 +931,7 @@ class TradingBot:
         
         if cached_data:
             self.news_sentiment[symbol] = cached_data
-            return
+            return cached_data  # أضفت return هنا لإرجاع البيانات المخبأة
             
         try:
             coin_symbol = symbol[:-4].upper()
@@ -803,7 +953,7 @@ class TradingBot:
                 results = [f.result() for f in futures if f.result() is not None]
             
             if not results:
-                return
+                return []  # أرجع قائمة فارغة بدل None
                 
             avg_score = sum(r['sentiment'] for r in results) / len(results)
             positive = sum(1 for r in results if r['sentiment'] > 0.1)
@@ -822,10 +972,14 @@ class TradingBot:
             self.news_sentiment[symbol] = sentiment_data
             self._cache_news(cache_key, sentiment_data)
             
+            return results  # أضفت return هنا لإرجاع الأخبار المعالجة
+            
         except Exception as e:
             self.send_notification('error', f'CryptoPanic Error: {str(e)}')
+            return []  # أرجع قائمة فارغة في حالة الخطأ
 
-    def _analyze_cryptopanic_post(self, post):
+    @staticmethod
+    def _analyze_cryptopanic_post(post):
         """تحليل مقالة فردية من CryptoPanic"""
         try:
             title = post.get('title', '')
@@ -895,15 +1049,13 @@ class TradingBot:
             
             if cached_data:
                 self.news_sentiment[symbol] = cached_data
-                return
-                
+                return []  # ← رجوع قائمة فارغة عند وجود كاش فقط
+
             coin_name = symbol[:-4]
             coin_mapping = {
                 "ADA": "cardano",
                 "XLM": "stellar",
-                
                 "ALGO": "algorand",
-                
             }
             
             search_term = coin_mapping.get(coin_name, coin_name.lower())
@@ -919,16 +1071,16 @@ class TradingBot:
             articles = soup.find_all('div', class_='article-cardstyles__StyledWrapper-q1x8lc-0')[:max_articles]
             
             if not articles:
-                return
-                
+                return []  # ← لا توجد مقالات، رجّع قائمة فارغة
+            
             # معالجة المقالات بشكل متوازي
             with ThreadPoolExecutor(max_workers=3) as executor:
                 futures = [executor.submit(self._process_coindesk_article, article) for article in articles]
                 results = [f.result() for f in futures if f.result() is not None]
             
             if not results:
-                return
-                
+                return []  # ← لا نتائج مفيدة، رجّع قائمة فارغة
+
             total_score = sum(r['sentiment'] for r in results)
             avg_score = total_score / len(results)
             
@@ -944,10 +1096,14 @@ class TradingBot:
             self.news_sentiment[symbol] = sentiment_data
             self._cache_news(cache_key, sentiment_data)
             
+            return results  # ← أهم شيء: رجع النتائج
+
         except Exception as e:
             self.send_notification('error', f'Coindesk Error: {str(e)}')
+            return []  # ← عند الخطأ رجع قائمة فارغة
 
-    def _process_coindesk_article(self, article):
+    @staticmethod
+    def _process_coindesk_article(article):
         """معالجة مقالة فردية من Coindesk"""
         try:
             title = article.find('h6').text.strip()
@@ -1033,7 +1189,7 @@ class TradingBot:
 
             # التحقق من وجود البيانات الأساسية
             if 'data' not in data or not isinstance(data['data'], list):
-                self.logger.warning(f"لا توجد تغريدات لـ {query}")
+                self.logger.warning("لا توجد تغريدات لـ %s", query)
                 return []
 
             # ربط المعرفات بالأسماء
@@ -1053,16 +1209,16 @@ class TradingBot:
                         'sentiment': round(TextBlob(tweet.get('text', '')).sentiment.polarity, 2)
                     })
                 except Exception as tweet_error:
-                    self.logger.error(f"خطأ في معالجة التغريدة: {tweet_error}")
+                    self.logger.error("خطأ في معالجة التغريدة: %s", tweet_error)
                     continue
 
             return news_items
 
         except requests.exceptions.RequestException as e:
-            self.logger.error(f"فشل الاتصال بموقع تويتر: {str(e)}")
+            self.logger.error("فشل الاتصال بموقع تويتر: %s", str(e))
             return []
         except Exception as e:
-            self.logger.error(f"فشل غير متوقع: {type(e).__name__}: {str(e)}")
+            self.logger.error("فشل غير متوقع: %s: %s", type(e).__name__, str(e))
             return []
 
     def _search_twitter(self, query, count=15):
@@ -1100,7 +1256,7 @@ class TradingBot:
                         for u in data['includes']['users']
                     }
                 except Exception as users_error:
-                    self.logger.error(f"خطأ في معالجة بيانات المستخدمين: {users_error}")
+                    self.logger.error("خطأ في معالجة بيانات المستخدمين: %s", str(users_error))
 
             # معالجة التغريدات بشكل آمن
             tweets = []
@@ -1117,16 +1273,16 @@ class TradingBot:
                             }
                         })
                     except Exception as tweet_error:
-                        self.logger.error(f"خطأ في معالجة التغريدة: {tweet_error}")
+                        self.logger.error("خطأ في معالجة التغريدة: %s", str(tweet_error))
                         continue
 
             return tweets
 
         except requests.exceptions.RequestException as e:
-            self.logger.error(f"فشل الاتصال بموقع تويتر: {str(e)}")
+            self.logger.error("فشل الاتصال بموقع تويتر: %s", str(e))
             return []
         except Exception as e:
-            self.logger.error(f"فشل غير متوقع: {type(e).__name__}: {str(e)}")
+            self.logger.error("فشل غير متوقع: %s: %s", type(e).__name__, str(e))
             return []
     
     def scrape_telegram_news(self, symbol=None):
@@ -1176,11 +1332,11 @@ class TradingBot:
                             })
                             
                     except Exception as e:
-                        self.logger.warning(f"فشل جلب رسائل {channel}: {str(e)}")
+                        self.logger.warning("فشل جلب رسائل %s: %s", channel, str(e))
                         continue
                         
         except Exception as e:
-            self.logger.error(f"فشل جلب أخبار التليجرام: {str(e)}", exc_info=True)
+            self.logger.error("فشل جلب أخبار التليجرام: %s", str(e), exc_info=True)
             self.send_notification('error', '❌ فشل جمع أخبار التليجرام')
         
         # تخزين النتائج إذا كانت هناك عملة محددة
@@ -1231,6 +1387,14 @@ class TradingBot:
             self.rotation_index = 0
 
     def round_quantity(self, quantity, step_size, min_qty=1e-6):
+        """
+        تقريب الكمية للأسفل لأقرب مضاعف للـ step_size، والتحقق أنها ≥ minQty.
+        """
+        rounded_qty = float(np.floor(quantity / step_size) * step_size)
+        return rounded_qty if rounded_qty >= min_qty else 0
+
+    @staticmethod
+    def round_quantity(quantity, step_size, min_qty=1e-6):
         """
         تقريب الكمية للأسفل لأقرب مضاعف للـ step_size، والتحقق أنها ≥ minQty.
         """
@@ -1354,7 +1518,7 @@ class TradingBot:
                     }
 
                 except Exception as e:
-                    self.logger.error(f"فشل تحليل الأداء لـ {symbol}: {str(e)}", exc_info=True)
+                    self.logger.error("فشل تحليل الأداء لـ %s: %s", symbol, str(e), exc_info=True)
                     report_data['models'][symbol] = {
                         'error': str(e),
                         'status': 'فشل التحليل'
@@ -1371,7 +1535,7 @@ class TradingBot:
                 'error': error_msg,
                 'status': 'فشل حرج'
             }
-    
+
     def save_state(self):
         state = {
             'current_positions': self.current_positions,
@@ -1385,9 +1549,10 @@ class TradingBot:
             self.send_notification('update', '💾 تم حفظ الحالة في الملف state.json')
         except Exception as e:
             try:
-                # 1. تسجيل الخطأ في نظام اللوجر الرسمي
+                # 1. تسجيل الخطأ في نظام اللوجر الرسمي بصيغة lazy formatting
                 self.logger.error(
-                    f"فشل حفظ الحالة - الخطأ: {str(e)}", 
+                    "فشل حفظ الحالة - الخطأ: %s",
+                    str(e),
                     exc_info=True,
                     stack_info=True,
                     extra={'section': 'state_saving'}
@@ -1412,58 +1577,139 @@ class TradingBot:
                         f.write(f"[{datetime.now()}] State Save Failure: {str(e)}\n")
                         traceback.print_exc(file=f)
                 except Exception as file_err:
-                    self.logger.critical(f"فشل حفظ ملف الطوارئ: {file_err}")
+                    self.logger.critical("فشل حفظ ملف الطوارئ: %s", file_err)
 
             except Exception as logging_error:
                 # 4. نظام طوارئ متعدد الطبقات إذا فشل التسجيل
                 try:
                     logging.basicConfig(level=logging.CRITICAL)
-                    logging.critical(f"Total failure: {logging_error}\nOriginal error: {e}")
+                    logging.critical("Total failure: %s\nOriginal error: %s", logging_error, e)
                 except:
                     sys.stderr.write(f"[ULTIMATE FALLBACK] State save failed: {e}\n")
 
     def load_state(self):
+        """تحميل الحالة مع التحقق من صحة البيانات وفحص التكامل"""
         try:
-            if os.path.exists('state.json'):
-                with open('state.json', 'r') as f:
+            state_file = 'state.json'
+            
+            # 1. التحقق من وجود الملف
+            if not os.path.exists(state_file):
+                self.logger.info("⚠️ لم يتم العثور على ملف state.json. سيبدأ البوت بحالة جديدة.")
+                self._initialize_default_state()
+                return
+
+            # 2. قراءة الملف مع التحقق من صحته
+            with open(state_file, 'r') as f:
+                try:
                     state = json.load(f)
-                if 'rotation_index' in state:
-                    self.rotation_index = state['rotation_index']
+                except json.JSONDecodeError as e:
+                    raise ValueError(f"ملف الحالة تالف ولا يمكن قراءته: {str(e)}")
 
-                expected_keys = ['current_positions', 'last_peaks', 'trailing_stops']
-                for key in expected_keys:
-                    if key not in state:
-                        raise ValueError(f"مفتاح مفقود في state.json: {key}")
+            # 3. التحقق من الهيكل الأساسي للبيانات
+            required_keys = ['current_positions', 'last_peaks', 'trailing_stops']
+            for key in required_keys:
+                if key not in state:
+                    raise ValueError(f"مفتاح مفقود في ملف الحالة: {key}")
 
-                self.current_positions = state.get('current_positions', {})
-                self.last_peaks = state.get('last_peaks', {})
-                self.trailing_stops = state.get('trailing_stops', {})
+            # 4. التحقق من صحة أنواع البيانات
+            if not isinstance(state['current_positions'], dict):
+                raise TypeError("current_positions يجب أن يكون من نوع dictionary")
+            
+            if not isinstance(state['last_peaks'], dict):
+                raise TypeError("last_peaks يجب أن يكون من نوع dictionary")
+                
+            if not isinstance(state['trailing_stops'], dict):
+                raise TypeError("trailing_stops يجب أن يكون من نوع dictionary")
 
-                print("📥 تم تحميل الحالة من state.json")
-                self.send_notification('update', '📥 تم تحميل الحالة من state.json')
+            # 5. التحقق من التوقيع الرقمي (اختياري)
+            if 'checksum' in state:
+                self._verify_state_checksum(state)
 
-            else:
-                self.current_positions = {}
-                self.last_peaks = {}
-                self.trailing_stops = {}
-                print("⚠️ لم يتم العثور على ملف state.json. بدأ البوت من الصفر.")
-                self.send_notification('update', '⚠️ لم يتم العثور على ملف state.json. بدأ البوت من الصفر.')
+            # 6. التحقق من توافق الرموز
+            for symbol in state['current_positions']:
+                if symbol not in self.symbols:
+                    self.logger.warning("رمز غير معروف في الحالة المحفوظة: %s", symbol)
 
-        except (json.JSONDecodeError, ValueError) as e:
-            timestamp = datetime.utcnow().strftime('%Y%m%d_%H%M%S')
-            os.rename('state.json', f'state_broken_{timestamp}.json')
-            self.current_positions = {}
-            self.last_peaks = {}
-            self.trailing_stops = {}
-            print(f"❌ خطأ في تحميل الحالة: {e} وتم حفظ النسخة التالفة.")
-            self.send_notification('error', f"❌ خطأ في تحميل الحالة: {e} وتمت إعادة الضبط.")
+            # 7. تعيين القيم مع التحقق من الصحة
+            self.current_positions = {
+                k: v for k, v in state['current_positions'].items() 
+                if self._validate_position_data(v)
+            }
+            
+            self.last_peaks = {
+                k: float(v) for k, v in state['last_peaks'].items()
+                if k in self.symbols and isinstance(v, (int, float))
+            }
+            
+            self.trailing_stops = {
+                k: float(v) for k, v in state['trailing_stops'].items()
+                if k in self.symbols and isinstance(v, (int, float))
+            }
+
+            self.logger.info("📥 تم تحميل الحالة بنجاح مع التحقق من الصحة")
+            self.send_notification('update', '📥 تم تحميل الحالة من state.json بعد التحقق')
 
         except Exception as e:
-            self.current_positions = {}
-            self.last_peaks = {}
-            self.trailing_stops = {}
-            print(f"❌ خطأ غير متوقع أثناء تحميل الحالة: {e}")
-            self.send_notification('error', f"❌ خطأ غير متوقع أثناء تحميل الحالة: {e}")
+            self._handle_state_loading_error(e, state_file)
+
+    def _initialize_default_state(self):
+        """تهيئة الحالة الافتراضية"""
+        self.current_positions = {}
+        self.last_peaks = {}
+        self.trailing_stops = {}
+        self.logger.info("تم تهيئة الحالة الافتراضية")
+
+    @staticmethod
+    def _validate_position_data(position_data):
+        """التحقق من صحة بيانات المركز"""
+        required_keys = ['entry_price', 'quantity', 'timestamp']
+        if not all(k in position_data for k in required_keys):
+            return False
+            
+        try:
+            float(position_data['entry_price'])
+            float(position_data['quantity'])
+            datetime.fromisoformat(position_data['timestamp'])
+            return True
+        except (ValueError, TypeError):
+            return False
+
+    @staticmethod
+    def _verify_state_checksum(state):
+        """التحقق من checksum البيانات (اختياري)"""
+        data_copy = state.copy()
+        checksum = data_copy.pop('checksum', None)
+        
+        if checksum is not None:
+            calculated = hashlib.sha256(
+                json.dumps(data_copy, sort_keys=True).encode()
+            ).hexdigest()
+            
+            if calculated != checksum:
+                raise ValueError("Checksum غير متطابق - البيانات قد تكون معطوبة")
+
+    def _handle_state_loading_error(self, error, state_file):
+        """معالجة أخطاء تحميل الحالة"""
+        error_msg = f"❌ خطأ في تحميل الحالة: {str(error)}"
+        self.logger.error(error_msg, exc_info=True)
+        
+        # نسخ احتياطي للملف التالف
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        corrupted_file = f"state_corrupted_{timestamp}.json"
+        shutil.copyfile(state_file, corrupted_file)
+        
+        self.logger.info("تم إنشاء نسخة احتياطية من الملف التالف: %s", corrupted_file)
+        
+        # تهيئة الحالة الافتراضية
+        self._initialize_default_state()
+        
+        self.send_notification(
+            'error',
+            f"❌ خطأ في تحميل الحالة\n"
+            f"📛 {type(error).__name__}\n"
+            f"💾 تم الاستعادة للافتراضي\n"
+            f"⏰ {datetime.now().strftime('%H:%M')}"
+        )
 
     def handle_binance_error(self, e):
         """معالجة أخطاء Binance المحددة"""
@@ -1486,7 +1732,7 @@ class TradingBot:
                 if hasattr(response, 'status_code'):
                     if response.status_code == 429:
                         retry_after = int(response.headers.get('Retry-After', 60))
-                        self.logger.warning(f"Rate limited. Retrying after {retry_after}s")
+                        self.logger.warning("Rate limited. Retrying after %s s", retry_after)
                         time.sleep(retry_after)
                         continue
 
@@ -1496,7 +1742,7 @@ class TradingBot:
                 return response
 
             except (requests.Timeout, requests.ConnectionError) as e:
-                self.logger.error(f"Network error (attempt {attempt+1}): {str(e)}")
+                self.logger.error("Network error (attempt %d): %s", attempt + 1, str(e))
                 if attempt == max_retries - 1:
                     raise APIConnectionError(f"Failed after {max_retries} attempts")
                 time.sleep(2 ** attempt)  # Exponential backoff
@@ -1505,8 +1751,10 @@ class TradingBot:
                 self.handle_binance_error(e)
                 raise
 
-    def _retry_api_request(self, request_func, max_retries=3, base_delay=1, *args, **kwargs):
+    @staticmethod
+    def _retry_api_request(request_func, *args, max_retries=3, base_delay=1, logger=None, **kwargs):
         """الجزء الخاص بإعادة المحاولة"""
+        import time
         for attempt in range(max_retries):
             try:
                 response = request_func(*args, **kwargs)
@@ -1514,6 +1762,10 @@ class TradingBot:
                     raise Exception(f"كود الخطأ: {response.status_code}")
                 return response
             except Exception as e:
+                if logger:
+                    logger.warning(f"📛 محاولة {attempt+1} فشلت: {str(e)}")
+                else:
+                    print(f"📛 محاولة {attempt+1} فشلت: {str(e)}")
                 if attempt == max_retries - 1:
                     raise
                 time.sleep(base_delay * (2 ** attempt))  # Exponential backoff
@@ -1526,11 +1778,11 @@ class TradingBot:
             return func(*args, **kwargs)
 
         except requests.exceptions.Timeout as e:
-            self.logger.warning(f"انتهت مهلة الطلب: {str(e)}")
+            self.logger.warning("انتهت مهلة الطلب: %s", str(e))
             raise APITimeoutError(f"مهلة الاتصال: {str(e)}")
 
         except requests.exceptions.ConnectionError as e:
-            self.logger.error(f"فشل الاتصال: {str(e)}")
+            self.logger.error("فشل الاتصال: %s", str(e))
             raise APIConnectionError(f"فشل في الاتصال بالخادم: {str(e)}")
 
         except binance.exceptions.BinanceAPIException as e:
@@ -1539,11 +1791,11 @@ class TradingBot:
             raise BinanceAPIError(error_msg)
 
         except json.JSONDecodeError as e:
-            self.logger.error(f"فشل تحليل JSON: {str(e)}")
+            self.logger.error("فشل تحليل JSON: %s", str(e))
             raise InvalidResponseError("استجابة API غير صالحة")
 
         except Exception as e:
-            self.logger.critical(f"خطأ غير متوقع: {type(e).__name__}: {str(e)}")
+            self.logger.critical("خطأ غير متوقع: %s: %s", type(e).__name__, str(e))
             raise APIError(f"فشل غير متوقع في API: {str(e)}")
 
     def process_trade(self, symbol):
@@ -1556,6 +1808,14 @@ class TradingBot:
                 self.client.get_historical_klines,
                 symbol, '1h', '1 day ago UTC'
             )
+
+            if not market_data or len(market_data) == 0:
+                self.logger.warning("🚫 لا توجد بيانات كافية لـ %s", symbol)
+                return None
+
+            # تحليل آخر إغلاق
+            latest_close = float(market_data[-1][4])
+            self.logger.debug("📊 آخر إغلاق لـ %s: %s", symbol, latest_close)
 
             # تنفيذ الصفقة
             order = self.safe_api_call(
@@ -1573,31 +1833,44 @@ class TradingBot:
             return None
 
         except BinanceAPIException as e:
-            if e.code == -1003:  # تم تجاوز حد الطلبات
+            if e.code == -1003:
                 self.send_notification('warning', 'تم تجاوز حد الطلبات - الانتظار 60 ثانية')
                 time.sleep(60)
-                return self.process_trade(symbol)  # إعادة المحاولة
+                return self.process_trade(symbol)
 
         except InsufficientFundsError:
             self.send_notification('error', 'رصيد غير كافي للتنفيذ')
             return None
 
         except Exception as e:
-            self.logger.error(f"فشل غير متوقع في معالجة الصفقة: {str(e)}")
+            self.logger.error("فشل غير متوقع في معالجة الصفقة: %s", str(e))
             self.send_notification('error', f'فشل تنفيذ الصفقة: {type(e).__name__}')
             return None
 
     def execute_trade(self, symbol):
-        """تنفيذ الصفقة مع التحكم في معدل الطلبات"""
+        """تنفيذ الصفقة مع فحص السعر الحالي والتحكم في معدل الطلبات"""
         try:
-            # طلب البيانات بمعدل 1 طلب/ثانية
+            # 1. جلب بيانات الشموع (الساعة الماضية)
             data = self.safe_api_request(
                 lambda: self.client.get_historical_klines(symbol, '1h', '1 day ago UTC'),
                 service_name='binance_klines',
                 rate_limit=1
             )
 
-            # طلب التنفيذ بمعدل 0.5 طلب/ثانية
+            if not data or len(data) == 0:
+                self.logger.warning("❌ لا توجد بيانات شمعات لـ %s", symbol)
+                return None
+
+            # 2. استخراج آخر سعر إغلاق (close price)
+            latest_close = float(data[-1][4])
+            self.logger.debug("🔍 آخر سعر إغلاق لـ %s: %s", symbol, latest_close)
+
+            # (اختياري) مثال: إلغاء الشراء إذا كان السعر مرتفع جدًا
+            if latest_close > 10:  # غيّر هذا الشرط حسب استراتيجيتك
+                self.logger.info("⛔ السعر مرتفع جدًا لـ %s (%s) — لن يتم تنفيذ الشراء", symbol, latest_close)
+                return None
+
+            # 3. تنفيذ أمر الشراء بمعدل 0.5 طلب/ثانية
             order = self.safe_api_request(
                 lambda: self.client.create_order(
                     symbol=symbol,
@@ -1609,10 +1882,10 @@ class TradingBot:
                 rate_limit=0.5
             )
             return order
-            
+
         except Exception as e:
-            self.logger.error(f"فشل تنفيذ الصفقة لـ {symbol}: {str(e)}")
-            self.send_notification('error', 
+            self.logger.error("فشل تنفيذ الصفقة لـ %s: %s", symbol, str(e))
+            self.send_notification('error',
                 f"❌ فشل تنفيذ الصفقة\n"
                 f"🪙 {symbol}\n"
                 f"📛 {str(e)[:200]}...")
@@ -1649,7 +1922,7 @@ class TradingBot:
 
             # ضبط الحد الأقصى
             if limit and limit > BINANCE_MAX_LIMIT:
-                self.logger.warning(f"تم تقليل الحد من {limit} إلى {BINANCE_MAX_LIMIT} بسبب قيود Binance")
+                self.logger.warning("تم تقليل الحد من %s إلى %s بسبب قيود Binance", limit, BINANCE_MAX_LIMIT)
                 limit = BINANCE_MAX_LIMIT
 
             # جلب البيانات
@@ -1708,7 +1981,7 @@ class TradingBot:
                 # 1. جلب البيانات
                 df = self.get_historical_data(symbol, interval=interval, limit=100)
                 if df is None or df.empty:
-                    self.logger.warning(f"بيانات {symbol} على {interval} فارغة")
+                    self.logger.warning("بيانات %s على %s فارغة", symbol, interval)
                     continue
 
                 # 2. حساب المؤشرات
@@ -1717,7 +1990,7 @@ class TradingBot:
                 # 3. التحقق من وجود جميع المؤشرات
                 if not all(indicator in df.columns for indicator in required_indicators):
                     missing = [ind for ind in required_indicators if ind not in df.columns]
-                    self.logger.warning(f"مؤشرات مفقودة لـ {symbol} على {interval}: {missing}")
+                    self.logger.warning("مؤشرات مفقودة لـ %s على %s: %s", symbol, interval, missing)
                     continue
 
                 # 4. استخراج القيم
@@ -1730,12 +2003,13 @@ class TradingBot:
                 }
 
             except Exception as e:
-                self.logger.error(f"فشل تحليل {interval} لـ {symbol}: {str(e)}", exc_info=True)
+                self.logger.error("فشل تحليل %s لـ %s: %s", interval, symbol, str(e), exc_info=True)
                 continue
 
         return analysis
 
-    def _is_connected(self, timeout=5):
+    @staticmethod
+    def _is_connected(timeout=5):
         """الفحص الأساسي لاتصال الإنترنت"""
         try:
             response = requests.get("https://api.binance.com/api/v3/ping", timeout=timeout)
@@ -1760,7 +2034,8 @@ class TradingBot:
         self.send_notification('error', 'انقطع الاتصال. إعادة المحاولة...')
         time.sleep(60)  # انتظر دقيقة قبل إعادة المحاولة
 
-    def initialize_ml_model(self):
+    @staticmethod
+    def initialize_ml_model():
         """
         تهيئة نموذج التعلم الآلي باستخدام XGBoost داخل Pipeline
         
@@ -1793,13 +2068,12 @@ class TradingBot:
             ))
         ])
 
-    def retrain_model(self):        
-        for symbol in self.symbols:
+    def retrain_model(self, symbol):        
             self.train_ml_model(symbol)  # سيتم التدريب لكل عملة على حدة
             file_path = f"training_data_{symbol}.csv"
             if not os.path.exists(file_path):
                 self.send_notification('warning', f"⚠️ لا يوجد بيانات تدريب لـ {symbol}")
-                continue
+                return
 
             try:
                 df = pd.read_csv(file_path)
@@ -1811,7 +2085,7 @@ class TradingBot:
                 ]
                 if not all(col in df.columns for col in required_columns):
                     self.send_notification('error', f"❌ الأعمدة ناقصة في {symbol}")
-                    continue
+                    return
 
                 X = df[required_columns[:-1]]
                 y = df['target']
@@ -2064,20 +2338,21 @@ class TradingBot:
                 current = df.iloc[i]
                 previous = df.iloc[i-1]
 
-                # شروط الدخول (نفس شروط التداول الحية)
+                # شروط الدخول مع استخدام previous
                 entry_conditions = (
                     current['ema20'] > current['ema50'] and
+                    previous['ema20'] <= previous['ema50'] and
                     current['rsi'] > 50 and
                     current['macd'] > current['macd_signal'] and
                     not in_position
                 )
 
-                # شروط الخروج
+                # شروط الخروج كما هي بدون تعديل
                 exit_conditions = (
                     in_position and 
-                    (current['close'] < current['ema20'] or  # كسر المتوسط المتحرك
-                     current['rsi'] > 70 or  # ذروة شراء
-                     current['close'] <= entry_price * 0.95)  # وقف خسارة 5%
+                    (current['close'] < current['ema20'] or
+                     current['rsi'] > 70 or
+                     current['close'] <= entry_price * 0.95)
                 )
 
                 # تنفيذ الدخول
@@ -2116,8 +2391,8 @@ class TradingBot:
                 'avg_profit': sum(t['profit_pct'] for t in trades) / len(trades),
                 'max_profit': max(t['profit_pct'] for t in trades),
                 'max_loss': min(t['profit_pct'] for t in trades),
-                'profit_factor': sum(t['profit_pct'] for t in winning_trades) / 
-                                abs(sum(t['profit_pct'] for t in losing_trades)) if losing_trades else float('inf'),
+                'profit_factor': (sum(t['profit_pct'] for t in winning_trades) / 
+                                  abs(sum(t['profit_pct'] for t in losing_trades))) if losing_trades else float('inf'),
                 'avg_duration': sum(t['duration'] for t in trades) / len(trades),
                 'trades': trades[:50]  # حفظ أول 50 صفقة فقط للتحليل
             }
@@ -2125,10 +2400,12 @@ class TradingBot:
             return results
 
         except Exception as e:
-            self.logger.error(f"فشل في الاختبار التاريخي لـ {symbol}: {str(e)}", exc_info=True)
+            self.logger.error("فشل في الاختبار التاريخي لـ %s: %s", symbol, str(e), exc_info=True)
             return {'error': str(e)}
 
-    def optimize_entry_conditions(self, symbol: str, test_periods: list = [30, 60, 90]) -> dict:
+    def optimize_entry_conditions(self, symbol: str, test_periods: list = None) -> dict:
+        if test_periods is None:
+            test_periods = [30, 60, 90]
         """
         تحسين معايير الدخول باستخدام البحث الشبكي مع تقييم متعدد المقاييس
 
@@ -2166,7 +2443,7 @@ class TradingBot:
             }
 
             # 4. دالة تقييم مخصصة تأخذ في الاعتبار الربحية
-            def profit_scorer(estimator, X, y):
+            def profit_scorer(estimator, X, _):
                 y_pred = estimator.predict(X)
                 profit = (y_pred * X['expected_profit']).sum()
                 return profit
@@ -2199,7 +2476,7 @@ class TradingBot:
             return best_params
 
         except Exception as e:
-            self.logger.error(f"فشل تحسين المعايير لـ {symbol}: {str(e)}", exc_info=True)
+            self.logger.error("فشل تحسين المعايير لـ %s: %s", symbol, str(e), exc_info=True)
             return {'error': str(e)}
 
     def _analyze_optimal_times(self, data: pd.DataFrame) -> dict:
@@ -2253,7 +2530,7 @@ class TradingBot:
             }
 
         except Exception as e:
-            self.logger.error(f"فشل تحليل أوقات السوق: {str(e)}", exc_info=True)
+            self.logger.error("فشل تحليل أوقات السوق: %s", str(e), exc_info=True)
             return {'error': str(e)}
 
     def _analyze_holiday_performance(self, data: pd.DataFrame) -> dict:
@@ -2290,7 +2567,7 @@ class TradingBot:
             }
 
         except Exception as e:
-            self.logger.error(f"فشل تحليل العطلات: {str(e)}", exc_info=True)
+            self.logger.error("فشل تحليل العطلات: %s", str(e), exc_info=True)
             return {'error': str(e)}
 
     def auto_optimize_strategy(self, symbol: str):
@@ -2333,7 +2610,7 @@ class TradingBot:
                 }
 
         except Exception as e:
-            self.logger.error(f"فشل التحسين التلقائي: {str(e)}", exc_info=True)
+            self.logger.error("فشل التحسين التلقائي: %s", str(e), exc_info=True)
             return {'status': 'error', 'message': str(e)}
 
     def save_optimization_results(self, symbol: str, results: dict):
@@ -2351,10 +2628,10 @@ class TradingBot:
                     'results': results
                 }, f, indent=2, ensure_ascii=False)
                 
-            self.logger.info(f"تم حفظ نتائج تحسين {symbol} في {file_path}")
+            self.logger.info("تم حفظ نتائج تحسين %s في %s", symbol, file_path)
             
         except Exception as e:
-            self.logger.error(f"فشل في حفظ نتائج التحسين: {str(e)}", exc_info=True)
+            self.logger.error("فشل في حفظ نتائج التحسين: %s", str(e), exc_info=True)
 
     def _process_coin_with_strategy(self, symbol: str, aggressive: bool = False):
         """معالجة العملة باستخدام الإستراتيجية المحددة"""
@@ -2379,8 +2656,9 @@ class TradingBot:
         self.optimal_trading_hours = list(set(all_hours))  # إزالة التكرارات
         
         self.save_market_timing_analysis(analysis)
-
-    def _validate_indicators(self, df):
+        
+    @staticmethod
+    def _validate_indicators(df):
         """التحقق من صحة المؤشرات المحسوبة"""
         required_indicators = ['ema20', 'ema50', 'rsi']
         for indicator in required_indicators:
@@ -2403,7 +2681,8 @@ class TradingBot:
                  self.send_notification('error', f"فشل جلب الرصيد: {str(e)}")
                  return None
 
-    def generate_recommendations(self, results: dict) -> list:
+    @staticmethod
+    def generate_recommendations(results: dict) -> list:
         """
         توليد توصيات تلقائية بناءً على نتائج الاختبار
         
@@ -2579,7 +2858,7 @@ class TradingBot:
         """
         معالجة متقدمة لكل عملة مع نظام متكامل لإدارة الأخطاء وتحليل متعدد الأطر الزمنية
         """
-        self.logger.info(f"بدأ معالجة {symbol}")
+        self.logger.info("بدأ معالجة %s", symbol)
         start_time = time.time()
         processed_successfully = False
 
@@ -2587,9 +2866,9 @@ class TradingBot:
             # ===== 1. تحديث بيانات الأخبار =====
             try:
                 self.update_news_sentiment(symbol)
-                self.logger.debug(f"تم تحديث أخبار {symbol}")
+                self.logger.debug("تم تحديث أخبار %s", symbol)
             except Exception as news_error:
-                error_msg = f"أخبار {symbol} | {type(news_error).__name__}: {str(news_error)}"
+                error_msg = "أخبار %s | %s: %s" % (symbol, type(news_error).__name__, str(news_error))
                 self.logger.error(error_msg, exc_info=True)
                 self.send_notification('warning', f"⚠️ أخبار {symbol[:4]}...")
 
@@ -2598,21 +2877,21 @@ class TradingBot:
                 signal_count_before = len(self.pro_signals.get(symbol, []))
                 self.update_pro_signals(symbol)
                 signal_count_after = len(self.pro_signals.get(symbol, []))
-                self.logger.debug(f"إشارات {symbol}: {signal_count_after - signal_count_before} جديدة")
+                self.logger.debug("إشارات %s: %d جديدة", symbol, signal_count_after - signal_count_before)
             except Exception as signal_error:
-                error_msg = f"إشارات {symbol} | {type(signal_error).__name__}: {str(signal_error)}"
+                error_msg = "إشارات %s | %s: %s" % (symbol, type(signal_error).__name__, str(signal_error))
                 self.logger.error(error_msg, exc_info=True)
 
             # ===== 3. جلب البيانات الأساسية (5m) =====
             try:
                 df_5m = self.get_historical_data(symbol, interval='5m', limit=100)
                 if df_5m is None or df_5m.empty:
-                    error_msg = f"بيانات {symbol} (5m) فارغة"
+                    error_msg = "بيانات %s (5m) فارغة" % symbol
                     self.logger.error(error_msg)
                     self.send_notification('warning', f"📉 بيانات {symbol[:4]} (5m)...")
                     return
             except Exception as data_error:
-                error_msg = f"بيانات {symbol} | {type(data_error).__name__}: {str(data_error)}"
+                error_msg = "بيانات %s | %s: %s" % (symbol, type(data_error).__name__, str(data_error))
                 self.logger.critical(error_msg, exc_info=True)
                 self.send_notification('error', f"❌ بيانات {symbol[:4]}...")
                 return
@@ -2623,15 +2902,16 @@ class TradingBot:
                 required_indicators = ['ema20', 'ema50', 'rsi', 'macd']
                 if not all(col in df_5m.columns for col in required_indicators):
                     missing = [col for col in required_indicators if col not in df_5m.columns]
-                    raise ValueError(f"مؤشرات فنية ناقصة: {missing}")
+                    raise ValueError("مؤشرات فنية ناقصة: %s" % missing)
 
                 self.logger.debug(
-                    f"تحليل {symbol} (5m): "
-                    f"EMA20={df_5m['ema20'].iloc[-1]:.4f}, "
-                    f"RSI={df_5m['rsi'].iloc[-1]:.2f}"
+                    "تحليل %s (5m): EMA20=%.4f, RSI=%.2f",
+                    symbol,
+                    df_5m['ema20'].iloc[-1],
+                    df_5m['rsi'].iloc[-1]
                 )
             except Exception as ta_error:
-                error_msg = f"تحليل فني {symbol} | {type(ta_error).__name__}: {str(ta_error)}"
+                error_msg = "تحليل فني %s | %s: %s" % (symbol, type(ta_error).__name__, str(ta_error))
                 self.logger.error(error_msg, exc_info=True)
                 self.send_notification('error', f"📊 تحليل {symbol[:4]}...")
                 return
@@ -2641,34 +2921,34 @@ class TradingBot:
             try:
                 timeframe_analysis = self.analyze_multiple_timeframes(symbol)
                 if not timeframe_analysis:
-                    self.logger.warning(f"تحليل الأطر الزمنية لـ {symbol} لم يعط نتائج")
+                    self.logger.warning("تحليل الأطر الزمنية لـ %s لم يعط نتائج", symbol)
             except Exception as timeframe_error:
-                error_msg = f"أطر زمنية {symbol} | {type(timeframe_error).__name__}: {str(timeframe_error)}"
+                error_msg = "أطر زمنية %s | %s: %s" % (symbol, type(timeframe_error).__name__, str(timeframe_error))
                 self.logger.error(error_msg, exc_info=True)
 
             # ===== 6. تقييم شروط الدخول =====
             try:
                 if self.evaluate_entry_conditions(df_5m, symbol):
-                    self.logger.info(f"إشارة شراء لـ {symbol} بناءً على تحليل متعدد الأطر")
+                    self.logger.info("إشارة شراء لـ %s بناءً على تحليل متعدد الأطر", symbol)
 
                     # ===== 7. تنفيذ أمر الشراء =====
                     try:
                         order_result = self.execute_buy_order(symbol)
                         if order_result:
-                            self.logger.info(f"تم تنفيذ أمر شراء {symbol}")
+                            self.logger.info("تم تنفيذ أمر شراء %s", symbol)
                             processed_successfully = True
                         else:
-                            self.logger.warning(f"فشل تنفيذ شراء {symbol}")
+                            self.logger.warning("فشل تنفيذ شراء %s", symbol)
                     except Exception as order_error:
-                        error_msg = f"تنفيذ أمر {symbol} | {type(order_error).__name__}: {str(order_error)}"
+                        error_msg = "تنفيذ أمر %s | %s: %s" % (symbol, type(order_error).__name__, str(order_error))
                         self.logger.error(error_msg, exc_info=True)
                         self.send_notification('error', f"💸 تنفيذ {symbol[:4]}...")
             except Exception as evaluation_error:
-                error_msg = f"تقييم {symbol} | {type(evaluation_error).__name__}: {str(evaluation_error)}"
+                error_msg = "تقييم %s | %s: %s" % (symbol, type(evaluation_error).__name__, str(evaluation_error))
                 self.logger.error(error_msg, exc_info=True)
 
         except Exception as global_error:
-            error_msg = f"فشل عام في {symbol} | {type(global_error).__name__}: {str(global_error)}"
+            error_msg = "فشل عام في %s | %s: %s" % (symbol, type(global_error).__name__, str(global_error))
             self.logger.critical(error_msg, exc_info=True)
             self.send_notification(
                 'error',
@@ -2679,7 +2959,7 @@ class TradingBot:
         finally:
             exec_time = time.time() - start_time
             status = "بنجاح" if processed_successfully else "بفشل"
-            self.logger.info(f"انتهت معالجة {symbol} {status} في {exec_time:.2f} ثانية")
+            self.logger.info("انتهت معالجة %s %s في %.2f ثانية", symbol, status, exec_time)
 
     def manage_all_positions(self):
         """
@@ -2707,7 +2987,7 @@ class TradingBot:
                     new_stop = current_price * (1 - self.trailing_percent / 100)
                     if symbol not in self.trailing_stops or new_stop > self.trailing_stops[symbol]:
                         self.trailing_stops[symbol] = new_stop
-                        self.logger.debug(f"Updated trailing for {symbol}: {new_stop:.4f}")
+                        self.logger.debug("Updated trailing for %s: %.4f", symbol, new_stop)
 
                 # 3. البيع فقط إذا تحقق الشرطان معًا
                 if (profit_percent >= self.min_profit and 
@@ -2734,7 +3014,7 @@ class TradingBot:
                 self.logger.error(error_msg, exc_info=True)
                 self.send_notification('error', error_msg[:200])
 
-    def _execute_sell_order(self, symbol, price, position, profit, duration):
+    def _execute_sell_order(self, symbol, price, position, profit, duration, reason=None):
         """
         تنفيذ أمر بيع آمن مع تنظيف كامل للبيانات
 
@@ -2819,7 +3099,7 @@ class TradingBot:
             }
 
         except Exception as e:
-            self.logger.error(f"فشل حساب مستويات فيبوناتشي: {str(e)}")
+            self.logger.error("فشل حساب مستويات فيبوناتشي: %s", str(e))
             self.fib_levels = {}
 
     def _calculate_pivot_points(self, df):
@@ -2845,7 +3125,7 @@ class TradingBot:
             }
 
         except Exception as e:
-            self.logger.error(f"فشل حساب نقاط البيفوت: {str(e)}")
+            self.logger.error("فشل حساب نقاط البيفوت: %s", str(e))
             self.pivot_points = {}
 
     # نظام التريلينغ ستوب المتقدم
@@ -2880,18 +3160,18 @@ class TradingBot:
         try:
             # ===== 1. التحقق من صحة البيانات الأساسية =====
             if df is None or len(df) == 0:
-                self.logger.warning(f"بيانات {symbol} فارغة أو غير صالحة")
+                self.logger.warning("بيانات %s فارغة أو غير صالحة", symbol)
                 return False
 
             required_columns = ['ema20', 'ema50', 'rsi', 'macd', 'volume', 'close']
             missing_columns = [col for col in required_columns if col not in df.columns]
             if missing_columns:
-                self.logger.warning(f"أعمدة مفقودة لـ {symbol}: {missing_columns}")
+                self.logger.warning("أعمدة مفقودة لـ %s: %s", symbol, missing_columns)
                 return False
 
             df_clean = df.dropna(subset=required_columns)
             if df_clean.empty:
-                self.logger.warning(f"بيانات {symbol} تحتوي على قيم فارغة بعد التنظيف")
+                self.logger.warning("بيانات %s تحتوي على قيم فارغة بعد التنظيف", symbol)
                 return False
 
             last = df_clean.iloc[-1]
@@ -2911,10 +3191,10 @@ class TradingBot:
             try:
                 timeframe_analysis = self.analyze_multiple_timeframes(symbol)
                 if not timeframe_analysis:
-                    self.logger.warning(f"فشل تحليل الأطر الزمنية لـ {symbol}")
+                    self.logger.warning("فشل تحليل الأطر الزمنية لـ %s", symbol)
                     return False
             except Exception as e:
-                self.logger.error(f"خطأ في تحليل الأطر الزمنية لـ {symbol}: {str(e)}")
+                self.logger.error("خطأ في تحليل الأطر الزمنية لـ %s: %s", symbol, str(e))
                 return False
 
             # ===== 4. تطبيق شروط الدخول =====
@@ -2933,7 +3213,7 @@ class TradingBot:
                         (tf15['rsi'] > params['rsi_min'])
                     )
                 except KeyError as e:
-                    self.logger.warning(f"بيانات إطار 15m ناقصة لـ {symbol}: {str(e)}")
+                    self.logger.warning("بيانات إطار 15m ناقصة لـ %s: %s", symbol, str(e))
                     cond_15m = False
 
             cond_1h = False
@@ -2942,7 +3222,7 @@ class TradingBot:
                     tf1h = timeframe_analysis['1h']
                     cond_1h = (tf1h['ema20'] > tf1h['ema50'])
                 except KeyError as e:
-                    self.logger.warning(f"بيانات إطار 1h ناقصة لـ {symbol}: {str(e)}")
+                    self.logger.warning("بيانات إطار 1h ناقصة لـ %s: %s", symbol, str(e))
                     cond_1h = False
 
             try:
@@ -2951,7 +3231,7 @@ class TradingBot:
                 cond_sentiment = (news_score > params['news_threshold']) and \
                                 (signal_count >= params['min_signals'])
             except Exception as e:
-                self.logger.error(f"خطأ في تحليل المشاعر لـ {symbol}: {str(e)}")
+                self.logger.error("خطأ في تحليل المشاعر لـ %s: %s", symbol, str(e))
                 cond_sentiment = False
 
             final_condition = (
@@ -2972,7 +3252,7 @@ class TradingBot:
 
                     model = self.load_or_initialize_model(symbol)
                     if model is None:
-                        self.logger.warning(f"النموذج غير متاح لـ {symbol}")
+                        self.logger.warning("النموذج غير متاح لـ %s", symbol)
                         return False
 
                     input_data = pd.DataFrame(features, columns=[
@@ -2984,7 +3264,7 @@ class TradingBot:
                     return prediction[0] == 1 if prediction is not None else False
 
                 except Exception as e:
-                    self.logger.error(f"فشل التنبؤ لـ {symbol}: {str(e)}")
+                    self.logger.error("فشل التنبؤ لـ %s: %s", symbol, str(e))
                     return False
 
             return False
@@ -2998,95 +3278,139 @@ class TradingBot:
 
     def load_or_initialize_model(self, symbol, use_cache=True):
         """
-        نسخة محسنة تماماً من دالة تحميل النموذج مع:
-        - التحقق من وجود مجلد النماذج
-        - معالجة جميع الأخطاء الممكنة
-        - إنشاء المجلد إذا لم يكن موجوداً
-        - ضمان عدم حدوث أي أخطاء
+        نسخة محسنة تماماً مع:
+        - التحقق من صحة الملف
+        - اختبار النموذج قبل التسليم
+        - نظام طوارئ متكامل
         """
         try:
-            # 1. التحقق من وجود مجلد 'models' أو إنشائه
+            # 1. التحقق من وجود مجلد النماذج
             models_dir = 'models'
-            os.makedirs(models_dir, exist_ok=True)
+            if not os.path.exists(models_dir):
+                os.makedirs(models_dir)
+                raise FileNotFoundError(f"تم إنشاء مجلد النماذج جديدًا لـ {symbol}")
             
-            # 2. المسار الكامل للملف
             model_path = os.path.join(models_dir, f'xgb_model_{symbol}.pkl')
             
-            # 3. التحقق من وجود الملف
+            # 2. إذا كان النموذج في الذاكرة المؤقتة
+            if use_cache and hasattr(self, '_model_cache') and symbol in self._model_cache:
+                cached_model = self._model_cache[symbol]
+                if self._validate_model(cached_model):
+                    return cached_model
+            
+            # 3. إذا لم يوجد ملف، ننشئ نموذجًا جديدًا
             if not os.path.exists(model_path):
-                error_msg = f"⚠️ ملف النموذج لـ {symbol} غير موجود في المسار: {model_path}"
-                self.logger.warning(error_msg)
-                self.send_notification('warning', error_msg)
-                return None
-
-            # 4. محاولة تحميل النموذج
-            try:
-                with open(model_path, 'rb') as f:
-                    model = joblib.load(f)
-                    
-                # 5. التحقق من صحة النموذج
-                required_methods = ['predict', 'predict_proba', 'fit']
-                for method in required_methods:
-                    if not hasattr(model, method):
-                        raise AttributeError(f"النموذج لا يحتوي على الدالة المطلوبة: {method}")
+                self.logger.warning("ملف النموذج غير موجود لـ %s، سيتم إنشاء نموذج جديد", symbol)
+                new_model = self.train_ml_model(symbol)  # سيحاول تدريب نموذج جديد
+                if new_model is None:
+                    raise ValueError(f"فشل تدريب نموذج جديد لـ {symbol}")
+                return new_model
+            
+            # 4. تحميل النموذج مع التحقق من صحته
+            with open(model_path, 'rb') as f:
+                model = joblib.load(f)
+            
+            if not self._validate_model(model):
+                raise ValueError(f"النموذج المحمل لـ {symbol} غير صالح")
+            
+            # 5. اختبار أداء النموذج
+            test_result = self._test_model_performance(model)
+            if not test_result['success']:
+                raise ValueError(f"أداء النموذج غير مقبول: {test_result['message']}")
+            
+            # 6. التخزين في الذاكرة المؤقتة إذا طلب
+            if use_cache:
+                if not hasattr(self, '_model_cache'):
+                    self._model_cache = OrderedDict()
+                    self._max_cached_models = 3
                 
-                # 6. اختبار تنبؤ تجريبي
-                dummy_data = pd.DataFrame([[0]*7], columns=[
-                    'ema20', 'ema50', 'rsi', 'macd',
-                    'volume', 'news_sentiment', 'signal_count'
-                ])
-                model.predict(dummy_data)  # إذا فشل هنا سيرفع استثناء
-                
-                # 7. التخزين في الذاكرة المؤقتة إذا طلب
-                if use_cache:
-                    if not hasattr(self, '_model_cache'):
-                        self._model_cache = OrderedDict()
-                        self._max_cached_models = 3
-                    
-                    self._model_cache[symbol] = model
-                    self._clean_model_cache()
-                
-                return model
-                
-            except Exception as load_error:
-                error_msg = f"فشل تحميل النموذج لـ {symbol}: {str(load_error)}"
-                self.logger.error(error_msg, exc_info=True)
-                
-                # نقل الملف التالف إلى مجلد الأخطاء
-                corrupted_dir = os.path.join(models_dir, 'corrupted')
-                os.makedirs(corrupted_dir, exist_ok=True)
-                corrupted_path = os.path.join(
-                    corrupted_dir,
-                    f'corrupted_{symbol}_{datetime.now().strftime("%Y%m%d_%H%M%S")}.pkl'
-                )
-                shutil.move(model_path, corrupted_path)
-                
-                self.send_notification(
-                    'error',
-                    f"🚨 نموذج تالف لـ {symbol}\n"
-                    f"تم نقله إلى: {corrupted_path}"
-                )
-                return None
-                
+                self._model_cache[symbol] = model
+                self._clean_model_cache()
+            
+            return model
+            
         except Exception as e:
-            error_msg = f"فشل غير متوقع في تحميل النموذج لـ {symbol}: {str(e)}"
-            self.logger.critical(error_msg, exc_info=True)
-            self.send_notification('error', error_msg[:200])
-            return None
+            self.logger.error("فشل تحميل/تهيئة النموذج لـ %s: %s", symbol, str(e), exc_info=True)
+            raise  # نعيد رفع الاستثناء للتعامل معه في المستوى الأعلى
 
-    def _validate_model_structure(self, model):
-        """التحقق من هيكل النموذج والمتطلبات"""
-        required_methods = ['predict', 'fit']
+    def _validate_model(self, model):
+        """نسخة محسنة تجمع بين الميزات"""
+        # التحقق من الدوال الأساسية
+        required_methods = ['predict', 'predict_proba', 'fit']
         for method in required_methods:
             if not hasattr(model, method):
-                raise AttributeError(f"النموذج يفتقد إلى الدالة الضرورية: {method}")
+                self.logger.error("النموذج يفتقد إلى الدالة: %s", method)
+                return False
 
-        # إذا كان النموذج من نوع Pipeline
+        # تحقق إضافي للنماذج من نوع Pipeline
         if hasattr(model, 'steps'):
             last_step = model.steps[-1][1]
             if not hasattr(last_step, 'feature_importances_'):
-                self.send_notification('warning',
-                    "النموذج قد لا يكون من نوع XGBClassifier")
+                self.logger.warning("النموذج قد لا يكون من نوع XGBClassifier")
+                # يمكن إضافة إشعار هنا إن أردت
+
+        return True
+
+    @staticmethod
+    def _test_model_performance(model):
+        """اختبار أداء النموذج على بيانات اختبارية"""
+        try:
+            # إنشاء بيانات اختبار وهمية
+            test_data = pd.DataFrame(np.random.rand(5, 7), columns=[
+                'ema20', 'ema50', 'rsi', 'macd',
+                'volume', 'news_sentiment', 'signal_count'
+            ])
+
+            # الاختبار الأساسي
+            predictions = model.predict(test_data)
+            if predictions is None or len(predictions) != 5:
+                return {
+                    'success': False,
+                    'message': "فشل في توليد التنبؤات"
+                }
+
+            # إذا كان النموذج يحتوي على predict_proba
+            if hasattr(model, 'predict_proba'):
+                probas = model.predict_proba(test_data)
+                if probas is None or not np.all(np.isfinite(probas)):
+                    return {
+                        'success': False,
+                        'message': "قيم احتمالية غير صالحة"
+                    }
+
+            return {'success': True, 'message': "النموذج صالح"}
+
+        except Exception as e:
+            return {
+                'success': False,
+                'message': f"فشل اختبار الأداء: {str(e)}"
+            }
+
+    def monitor_model_performance(self):
+        """مراقبة أداء النماذج بشكل دوري"""
+        for symbol, model in self.models.items():
+            try:
+                # جلب بيانات حديثة للاختبار
+                recent_data = self.collect_recent_data(symbol)
+                if recent_data is None or recent_data.empty:
+                    continue
+
+                # تقييم الأداء
+                performance = self.evaluate_model(model, recent_data)
+
+                # إذا كان الأداء تحت عتبة معينة، إعادة التدريب
+                if performance['accuracy'] < 0.6:
+                    self.logger.warning(
+                        "أداء النموذج لـ %s منخفض (%.2f)، سيتم إعادة التدريب",
+                        symbol, performance['accuracy']
+                    )
+                    self.retrain_model(symbol)
+            except Exception as e:
+                self.logger.error(
+                    "فشل مراقبة أداء النموذج لـ %s: %s",
+                    symbol, str(e),
+                    exc_info=True
+                )
 
     def initialize_and_train_model(self):
         """
@@ -3171,7 +3495,7 @@ class TradingBot:
                     df['1h_volume'] = df_1h['volume']
 
             except Exception as e:
-                self.logger.warning(f"فشل جلب بيانات الأطر الزمنية: {str(e)}")
+                self.logger.warning("فشل جلب بيانات الأطر الزمنية: %s", str(e))
 
             # 5. حساب الهدف (Target)
             future_window = 12
@@ -3186,7 +3510,7 @@ class TradingBot:
             self.send_notification('update', f'✅ تم تحديث بيانات التدريب لـ {symbol} وحفظها في {file_path}.')
 
         except Exception as e:
-            self.logger.error(f"فشل تحديث بيانات التدريب: {str(e)}", exc_info=True)
+            self.logger.error("فشل تحديث بيانات التدريب: %s", str(e), exc_info=True)
             self.send_notification('error', f'❌ فشل تحديث بيانات التدريب لـ {symbol}: {e}')
 
     def validate_system(self):
@@ -3242,7 +3566,7 @@ class TradingBot:
             training_file = f"training_data_{symbol}.csv"
             if not os.path.exists(training_file):
                 error_msg = f"ملف التدريب {training_file} غير موجود"
-                self.logger.error(error_msg)
+                self.logger.error("%s", error_msg)
                 self.send_notification(
                     'error',
                     f"📁 ملف التدريب مفقود\n"
@@ -3261,18 +3585,18 @@ class TradingBot:
                 
                 if not all(col in df.columns for col in required_columns):
                     missing = [col for col in required_columns if col not in df.columns]
-                    error_msg = f"أعمدة مفقودة: {', '.join(missing)}"
-                    self.logger.error(error_msg)
+                    error_msg = "أعمدة مفقودة: %s" % ', '.join(missing)
+                    self.logger.error("%s", error_msg)
                     raise ValueError(error_msg)
 
                 df = df.dropna(subset=required_columns)
                 if len(df) < 100:  # حد أدنى 100 صف للتدريب
-                    error_msg = f"بيانات تدريب غير كافية ({len(df)} صف فقط)"
-                    self.logger.error(error_msg)
+                    error_msg = "بيانات تدريب غير كافية (%d صف فقط)" % len(df)
+                    self.logger.error("%s", error_msg)
                     raise ValueError(error_msg)
 
             except Exception as load_error:
-                error_msg = f"تحميل بيانات التدريب | {type(load_error).__name__}: {str(load_error)}"
+                error_msg = "تحميل بيانات التدريب | %s: %s" % (type(load_error).__name__, str(load_error))
                 self.logger.error(error_msg, exc_info=True)
                 raise
 
@@ -3288,7 +3612,7 @@ class TradingBot:
                     stratify=y
                 )
             except Exception as split_error:
-                error_msg = f"تقسيم البيانات | {type(split_error).__name__}: {str(split_error)}"
+                error_msg = "تقسيم البيانات | %s: %s" % (type(split_error).__name__, str(split_error))
                 self.logger.error(error_msg, exc_info=True)
                 raise
 
@@ -3308,7 +3632,7 @@ class TradingBot:
                 
                 model.fit(X_train, y_train)
             except Exception as train_error:
-                error_msg = f"تدريب النموذج | {type(train_error).__name__}: {str(train_error)}"
+                error_msg = "تدريب النموذج | %s: %s" % (type(train_error).__name__, str(train_error))
                 self.logger.error(error_msg, exc_info=True)
                 raise
 
@@ -3328,13 +3652,11 @@ class TradingBot:
                 }
                 
                 self.logger.info(
-                    f"أداء النموذج لـ {symbol} | "
-                    f"الدقة: {metrics['accuracy']} | "
-                    f"الدقة: {metrics['precision']} | "
-                    f"الاسترجاع: {metrics['recall']}"
+                    "أداء النموذج لـ %s | الدقة: %.4f | الدقة: %.4f | الاسترجاع: %.4f",
+                    symbol, metrics['accuracy'], metrics['precision'], metrics['recall']
                 )
             except Exception as eval_error:
-                error_msg = f"تقييم النموذج | {type(eval_error).__name__}: {str(eval_error)}"
+                error_msg = "تقييم النموذج | %s: %s" % (type(eval_error).__name__, str(eval_error))
                 self.logger.error(error_msg, exc_info=True)
                 raise
 
@@ -3347,10 +3669,10 @@ class TradingBot:
                 if not os.path.exists(model_path):
                     raise RuntimeError("فشل حفظ النموذج على القرص")
                     
-                self.logger.info(f"تم حفظ النموذج في {model_path}")
+                self.logger.info("تم حفظ النموذج في %s", model_path)
                 
             except Exception as save_error:
-                error_msg = f"حفظ النموذج | {type(save_error).__name__}: {str(save_error)}"
+                error_msg = "حفظ النموذج | %s: %s" % (type(save_error).__name__, str(save_error))
                 self.logger.error(error_msg, exc_info=True)
                 raise
 
@@ -3369,7 +3691,7 @@ class TradingBot:
             raise  # نعيد رفع الخطأ للتعامل معه في المستوى الأعلى
 
         except Exception as e:
-            error_msg = f"فشل تدريب النموذج لـ {symbol}: {type(e).__name__}: {str(e)}"
+            error_msg = "فشل تدريب النموذج لـ %s: %s: %s" % (symbol, type(e).__name__, str(e))
             self.logger.critical(error_msg, exc_info=True)
             self.send_notification(
                 'error',
@@ -3426,7 +3748,7 @@ class TradingBot:
                 f.write(json.dumps(performance_log) + '\n')
 
         except Exception as e:
-            self.logger.error(f"فشل تسجيل أداء النموذج: {str(e)}")
+            self.logger.error("فشل تسجيل أداء النموذج: %s", str(e))
 
     def get_bot_status(self):
         return {
@@ -3732,9 +4054,9 @@ class TradingBot:
                     time.sleep(60)
 
                 except Exception as e:
-                    self.logger.critical(f"خطأ في الدورة الرئيسية: {str(e)}", exc_info=True)
+                    self.logger.critical("خطأ في الدورة الرئيسية: %s", str(e), exc_info=True)
                     time.sleep(30)  # انتظار 30 ثانية قبل إعادة المحاولة
 
         except Exception as e:
-            self.logger.error(f"انهيار في دالة run: {str(e)}", exc_info=True)
+            self.logger.error("انهيار في دالة run: %s", str(e), exc_info=True)
             self.shutdown_bot(reason=f"خطأ حرج: {type(e).__name__}")
