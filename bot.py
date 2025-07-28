@@ -1,5 +1,4 @@
 import os
-import hashlib
 import time
 import schedule
 import requests
@@ -131,127 +130,48 @@ class TradingBot:
         self.load_state()
         self.load_rotation_index()
 
-        # تحميل النماذج لكل عملة مع نظام طوارئ متكامل
-        self.models = {}
+        # تحميل النماذج لكل عملة
         for symbol in self.symbols:
             try:
-                # 1. محاولة تحميل النموذج الرئيسي
                 model = self.load_or_initialize_model(symbol, use_cache=True)
-                
-                # 2. التحقق من صحة النموذج
-                if model is None:
-                    raise ValueError("النموذج غير محمل (قيمة None)")
-                
-                # 3. اختبار عملي للنموذج
-                test_data = pd.DataFrame([[
-                    0, 0, 50, 0, 1000000, 0, 0
-                ]], columns=[
-                    'ema20', 'ema50', 'rsi', 'macd',
-                    'volume', 'news_sentiment', 'signal_count'
-                ])
-                
-                prediction = model.predict(test_data)
-                if prediction is None or len(prediction) == 0:
-                    raise ValueError("فشل في توليد التنبؤات")
-                
-                # 4. إذا نجحت جميع الاختبارات
+                if model is not None:
+                    # اختبار النموذج ببيانات وهمية
+                    dummy_input = pd.DataFrame([[
+                        0, 0, 50, 0, 1000000, 0, 0
+                    ]], columns=[
+                        'ema20', 'ema50', 'rsi', 'macd',
+                        'volume', 'news_sentiment', 'signal_count'
+                    ])
+                    model.predict(dummy_input)
                 self.models[symbol] = model
-                self.logger.info(f"تم تحميل النموذج بنجاح لـ {symbol}")
-                
             except Exception as e:
-                self.logger.error(f"فشل تحميل النموذج الرئيسي لـ {symbol}: {str(e)}", exc_info=True)
-                
-                try:
-                    # 5. محاولة تحميل نسخة احتياطية
-                    backup_model = self._load_backup_model(symbol)
-                    if backup_model:
-                        self.models[symbol] = backup_model
-                        self.logger.warning(f"تم تحميل نسخة احتياطية لـ {symbol}")
-                        continue
-                        
-                    # 6. إنشاء نموذج طوارئ بسيط
-                    self.models[symbol] = self._create_emergency_model()
-                    self.logger.critical(f"تم إنشاء نموذج طوارئ لـ {symbol}")
-                    
-                    self.send_notification(
-                        'warning',
-                        f"⚠️ تحذير: تم استخدام نموذج طوارئ لـ {symbol}\n"
-                        f"السبب: {str(e)[:150]}"
-                    )
-                    
-                except Exception as emergency_error:
-                    self.logger.critical(
-                        f"فشل إنشاء نموذج طوارئ لـ {symbol}: {str(emergency_error)}",
-                        exc_info=True
-                    )
-                    self.shutdown_bot(reason=f"فشل حرج في تحميل النماذج: {str(emergency_error)}")
-                    raise RuntimeError(f"لا يمكن المتابعة بدون نموذج لـ {symbol}") from emergency_error
-
-    def initialize_fallback_model(self):
-        """إنشاء نموذج بديل أساسي في حال فشل التحميل"""
-        try:
-            model = Pipeline([
-                ('scaler', StandardScaler()),
-                ('xgb', XGBClassifier(
-                    objective='binary:logistic',
-                    learning_rate=0.05,
-                    max_depth=3,
-                    n_estimators=100,
-                    random_state=42
-                ))
-            ])
-            
-            # إنشاء بيانات تدريب وهمية أساسية
-            dummy_X = pd.DataFrame(np.random.rand(10, 7), columns=[
-                'ema20', 'ema50', 'rsi', 'macd',
-                'volume', 'news_sentiment', 'signal_count'
-            ])
-            dummy_y = np.random.randint(0, 2, 10)
-            
-            # تدريب سريع على بيانات وهمية
-            model.fit(dummy_X, dummy_y)
-            
-            return model
-            
-        except Exception as e:
-            self.logger.error(f"فشل إنشاء نموذج بديل: {str(e)}", exc_info=True)
-            raise RuntimeError("لا يمكن إنشاء نموذج بديل") from e
+                self.send_notification('error', f"❌ فشل تحميل النموذج لـ {symbol}: {e}")
+                self.models[symbol] = None
 
     def _init_logging(self):
-        """إعداد نظام تسجيل الأخطاء الآمن مع تجنب التعارض في الملفات"""
+        """إعداد نظام تسجيل الأخطاء الآمن مع ضمانات متعددة"""
         try:
             # 1. إنشاء مجلد اللوجات إذا لم يكن موجوداً
-            logs_dir = 'logs'
-            os.makedirs(logs_dir, exist_ok=True)
+            os.makedirs('logs', exist_ok=True)
 
-            # 2. إنشاء اسم فريد لل logger مع تجنب التعارض
-            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-            logger_name = f'trading_bot_{timestamp}'
-            
-            # 3. التحقق من عدم وجود ملف بنفس الاسم (حماية إضافية)
-            log_file = f'{logs_dir}/bot_{datetime.now().strftime("%Y%m%d")}.log'
-            counter = 1
-            while os.path.exists(log_file):
-                log_file = f'{logs_dir}/bot_{datetime.now().strftime("%Y%m%d")}_{counter}.log'
-                counter += 1
-
-            # 4. إنشاء logger جديد
+            # 2. إنشاء اسم فريد لل logger
+            logger_name = f'trading_bot_{datetime.now().strftime("%Y%m%d_%H%M%S")}'
             self.logger = logging.getLogger(logger_name)
             self.logger.setLevel(logging.DEBUG)
 
-            # 5. منع تكرار ال handlers
+            # 3. منع تكرار ال handlers
             if self.logger.hasHandlers():
                 self.logger.handlers.clear()
 
-            # 6. إنشاء formatter متقدم
+            # 4. إنشاء formatter متقدم
             formatter = logging.Formatter(
                 '%(asctime)s | %(levelname)-8s | %(name)s | %(message)s | Line:%(lineno)d',
                 datefmt='%Y-%m-%d %H:%M:%S'
             )
 
-            # 7. إنشاء file handler مع تدوير الملفات
+            # 5. إنشاء file handler مع تدوير الملفات
             file_handler = RotatingFileHandler(
-                log_file,
+                f'logs/bot_{datetime.now().strftime("%Y%m%d")}.log',
                 maxBytes=5*1024*1024,  # 5MB
                 backupCount=3,
                 encoding='utf-8'
@@ -259,16 +179,18 @@ class TradingBot:
             file_handler.setFormatter(formatter)
             self.logger.addHandler(file_handler)
 
-            # 8. إنشاء console handler للطوارئ
+            # 6. إنشاء console handler للطوارئ
             console_handler = logging.StreamHandler()
             console_handler.setFormatter(formatter)
             self.logger.addHandler(console_handler)
 
-            # 9. تسجيل بدء التشغيل
+            # 7. تسجيل بدء التشغيل
             self.logger.info("✅ تم تهيئة نظام التسجيل بنجاح")
 
         except Exception as e:
             """نظام الطوارئ عند فشل تهيئة نظام التسجيل"""
+
+            # 1. محاولة إنشاء logger طوارئ بأقصى درجات الأمان
             try:
                 # أ. تهيئة أساسيات logging
                 logging.basicConfig(
@@ -293,8 +215,24 @@ class TradingBot:
                 # د. تعيين logger الطوارئ للنظام
                 self.logger = emergency_logger
 
+                # هـ. إرسال تنبيه عاجل
+                try:
+                    self.send_notification(
+                        'system_failure',
+                        f"🔥 نظام التسجيل الرئيسي تعطل\n"
+                        f"🆘 تم تفعيل نظام الطوارئ\n"
+                        f"📛 الخطأ: {type(e).__name__}\n"
+                        f"⏰ {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"
+                    )
+                except Exception as notif_error:
+                    print(f"فشل إرسال تنبيه الطوارئ: {notif_error}")
+
             except Exception as nested_ex:
-                # أبسط حل كحماية أخيرة
+                # 2. إذا فشل نظام الطوارئ نفسه
+                print(f"🔥🔥 فشل نظام الطوارئ: {nested_ex}")
+                print(f"🆘 الخطأ الأصلي: {e}")
+
+                # 3. أبسط حل كحماية أخيرة
                 with open('crash_report.log', 'a', encoding='utf-8') as f:
                     f.write(f"[{datetime.now()}] SYSTEM COLLAPSE: {str(e)}\n")
                     f.write(f"[{datetime.now()}] EMERGENCY FAILURE: {str(nested_ex)}\n")
@@ -514,7 +452,6 @@ class TradingBot:
         return news_items[:50]  # إرجاع آخر 50 خبر فقط
 
     def _fetch_twitter_signals(self, symbol):
-        """نسخة محسنة من دالة جلب إشارات التويتر بتحليل لغوي متقدم"""
         signals = []
         coin_name = symbol[:-4]  # إزالة USDT
         cutoff_time = datetime.now() - timedelta(hours=48)
@@ -525,31 +462,25 @@ class TradingBot:
                 tweets = self._get_user_tweets(username)
                 for tweet in tweets:
                     try:
+                        # تحويل التاريخ بشكل آمن مع دعم تنسيقات متعددة
                         tweet_time = self._safe_parse_date(tweet.get('created_at', ''))
-                        if tweet_time is None or tweet_time < cutoff_time:
+                        
+                        # إذا فشل تحويل التاريخ، نتخطى هذه التغريدة
+                        if tweet_time is None:
                             continue
                             
-                        tweet_text = tweet.get('text', '').lower()
-                        
-                        # 1. التحقق من ذكر العملة
-                        if coin_name.lower() not in tweet_text:
-                            continue
+                        # الفلترة حسب الوقت + شروط الإشارة
+                        if (tweet_time > cutoff_time and 
+                            coin_name.lower() in tweet.get('text', '').lower() and
+                            TextBlob(tweet.get('text', '')).sentiment.polarity > 0.1 and
+                            any(word in tweet.get('text', '').lower() for word in ['buy', 'long', 'bullish'])):
                             
-                        # 2. تحليل المشاعر المتقدم
-                        sentiment = self._advanced_sentiment_analysis(tweet_text)
-                        
-                        # 3. الكشف عن الإشارات الضمنية
-                        signal_type = self._detect_signal_type(tweet_text)
-                        
-                        if signal_type != 'neutral':
                             signals.append({
                                 'source': 'Twitter',
                                 'author': username,
                                 'text': tweet.get('text', '')[:200],
                                 'time': tweet_time.isoformat(),
-                                'sentiment': sentiment,
-                                'signal_type': signal_type,
-                                'confidence': self._calculate_confidence(tweet_text)
+                                'sentiment': TextBlob(tweet.get('text', '')).sentiment.polarity
                             })
                     except Exception as tweet_error:
                         self.logger.warning(f"خطأ في معالجة تغريدة من {username}: {str(tweet_error)}")
@@ -560,71 +491,6 @@ class TradingBot:
                 continue
 
         return signals
-
-    def _advanced_sentiment_analysis(self, text):
-        """تحليل مشاعر متقدم باستخدام TextBlob مع تحسينات"""
-        analysis = TextBlob(text)
-        
-        # تحسين تحليل المشاعر للسياق المالي
-        financial_words = {
-            'bullish': 0.8,
-            'bearish': -0.8,
-            'pump': -0.5,
-            'dump': -0.7,
-            'moon': 0.9,
-            'rocket': 0.7,
-            'crash': -0.9,
-            'rally': 0.6
-        }
-        
-        # تعديل النتيجة بناء على المصطلحات المالية
-        for word, weight in financial_words.items():
-            if word in text:
-                analysis.sentiment.polarity = min(1.0, max(-1.0, analysis.sentiment.polarity + weight * 0.3))
-        
-        return round(analysis.sentiment.polarity, 2)
-
-    def _detect_signal_type(self, text):
-        """الكشف عن نوع الإشارة باستخدام تحليل سياقي"""
-        text = text.lower()
-        
-        # قوائم الكلمات الدالة
-        buy_signals = ['buy', 'long', 'bullish', 'accumulate', 'entry', 'moon', 'rocket']
-        sell_signals = ['sell', 'short', 'bearish', 'exit', 'dump', 'crash']
-        caution_signals = ['warning', 'caution', 'careful', 'volatile']
-        
-        # تحليل النص
-        buy_count = sum(text.count(word) for word in buy_signals)
-        sell_count = sum(text.count(word) for word in sell_signals)
-        caution_count = sum(text.count(word) for word in caution_signals)
-        
-        # تحديد نوع الإشارة
-        if buy_count > sell_count and buy_count > caution_count:
-            return 'buy'
-        elif sell_count > buy_count and sell_count > caution_count:
-            return 'sell'
-        elif caution_count > max(buy_count, sell_count):
-            return 'caution'
-        else:
-            return 'neutral'
-
-    def _calculate_confidence(self, text):
-        """حساب ثقة الإشارة بناء على عوامل متعددة"""
-        factors = []
-        
-        # 1. طول التغريدة
-        factors.append(min(1.0, len(text) / 100))
-        
-        # 2. عدد المصطلحات الدالة
-        keywords = ['target', 'stop', 'resistance', 'support', 'breakout']
-        factors.append(min(1.0, sum(text.count(kw) for kw in keywords) / 3))
-        
-        # 3. علامات الترقيم (العلامات القوية)
-        strong_punct = ['!', '🚀', '🔥', '📈', '📉']
-        factors.append(min(1.0, sum(text.count(p) for p in strong_punct) / 2))
-        
-        # متوسط عوامل الثقة
-        return round(sum(factors) / len(factors), 2)
 
     def _safe_parse_date(self, date_str):
         """تحويل التاريخ بشكل آمن مع دعم تنسيقات متعددة"""
@@ -1557,126 +1423,47 @@ class TradingBot:
                     sys.stderr.write(f"[ULTIMATE FALLBACK] State save failed: {e}\n")
 
     def load_state(self):
-        """تحميل الحالة مع التحقق من صحة البيانات وفحص التكامل"""
         try:
-            state_file = 'state.json'
-            
-            # 1. التحقق من وجود الملف
-            if not os.path.exists(state_file):
-                self.logger.info("⚠️ لم يتم العثور على ملف state.json. سيبدأ البوت بحالة جديدة.")
-                self._initialize_default_state()
-                return
-
-            # 2. قراءة الملف مع التحقق من صحته
-            with open(state_file, 'r') as f:
-                try:
+            if os.path.exists('state.json'):
+                with open('state.json', 'r') as f:
                     state = json.load(f)
-                except json.JSONDecodeError as e:
-                    raise ValueError(f"ملف الحالة تالف ولا يمكن قراءته: {str(e)}")
+                if 'rotation_index' in state:
+                    self.rotation_index = state['rotation_index']
 
-            # 3. التحقق من الهيكل الأساسي للبيانات
-            required_keys = ['current_positions', 'last_peaks', 'trailing_stops']
-            for key in required_keys:
-                if key not in state:
-                    raise ValueError(f"مفتاح مفقود في ملف الحالة: {key}")
+                expected_keys = ['current_positions', 'last_peaks', 'trailing_stops']
+                for key in expected_keys:
+                    if key not in state:
+                        raise ValueError(f"مفتاح مفقود في state.json: {key}")
 
-            # 4. التحقق من صحة أنواع البيانات
-            if not isinstance(state['current_positions'], dict):
-                raise TypeError("current_positions يجب أن يكون من نوع dictionary")
-            
-            if not isinstance(state['last_peaks'], dict):
-                raise TypeError("last_peaks يجب أن يكون من نوع dictionary")
-                
-            if not isinstance(state['trailing_stops'], dict):
-                raise TypeError("trailing_stops يجب أن يكون من نوع dictionary")
+                self.current_positions = state.get('current_positions', {})
+                self.last_peaks = state.get('last_peaks', {})
+                self.trailing_stops = state.get('trailing_stops', {})
 
-            # 5. التحقق من التوقيع الرقمي (اختياري)
-            if 'checksum' in state:
-                self._verify_state_checksum(state)
+                print("📥 تم تحميل الحالة من state.json")
+                self.send_notification('update', '📥 تم تحميل الحالة من state.json')
 
-            # 6. التحقق من توافق الرموز
-            for symbol in state['current_positions']:
-                if symbol not in self.symbols:
-                    self.logger.warning(f"رمز غير معروف في الحالة المحفوظة: {symbol}")
+            else:
+                self.current_positions = {}
+                self.last_peaks = {}
+                self.trailing_stops = {}
+                print("⚠️ لم يتم العثور على ملف state.json. بدأ البوت من الصفر.")
+                self.send_notification('update', '⚠️ لم يتم العثور على ملف state.json. بدأ البوت من الصفر.')
 
-            # 7. تعيين القيم مع التحقق من الصحة
-            self.current_positions = {
-                k: v for k, v in state['current_positions'].items() 
-                if self._validate_position_data(v)
-            }
-            
-            self.last_peaks = {
-                k: float(v) for k, v in state['last_peaks'].items()
-                if k in self.symbols and isinstance(v, (int, float))
-            }
-            
-            self.trailing_stops = {
-                k: float(v) for k, v in state['trailing_stops'].items()
-                if k in self.symbols and isinstance(v, (int, float))
-            }
-
-            self.logger.info("📥 تم تحميل الحالة بنجاح مع التحقق من الصحة")
-            self.send_notification('update', '📥 تم تحميل الحالة من state.json بعد التحقق')
+        except (json.JSONDecodeError, ValueError) as e:
+            timestamp = datetime.utcnow().strftime('%Y%m%d_%H%M%S')
+            os.rename('state.json', f'state_broken_{timestamp}.json')
+            self.current_positions = {}
+            self.last_peaks = {}
+            self.trailing_stops = {}
+            print(f"❌ خطأ في تحميل الحالة: {e} وتم حفظ النسخة التالفة.")
+            self.send_notification('error', f"❌ خطأ في تحميل الحالة: {e} وتمت إعادة الضبط.")
 
         except Exception as e:
-            self._handle_state_loading_error(e, state_file)
-
-    def _initialize_default_state(self):
-        """تهيئة الحالة الافتراضية"""
-        self.current_positions = {}
-        self.last_peaks = {}
-        self.trailing_stops = {}
-        self.logger.info("تم تهيئة الحالة الافتراضية")
-
-    def _validate_position_data(self, position_data):
-        """التحقق من صحة بيانات المركز"""
-        required_keys = ['entry_price', 'quantity', 'timestamp']
-        if not all(k in position_data for k in required_keys):
-            return False
-            
-        try:
-            float(position_data['entry_price'])
-            float(position_data['quantity'])
-            datetime.fromisoformat(position_data['timestamp'])
-            return True
-        except (ValueError, TypeError):
-            return False
-
-    def _verify_state_checksum(self, state):
-        """التحقق من checksum البيانات (اختياري)"""
-        data_copy = state.copy()
-        checksum = data_copy.pop('checksum', None)
-        
-        if checksum is not None:
-            calculated = hashlib.sha256(
-                json.dumps(data_copy, sort_keys=True).encode()
-            ).hexdigest()
-            
-            if calculated != checksum:
-                raise ValueError("Checksum غير متطابق - البيانات قد تكون معطوبة")
-
-    def _handle_state_loading_error(self, error, state_file):
-        """معالجة أخطاء تحميل الحالة"""
-        error_msg = f"❌ خطأ في تحميل الحالة: {str(error)}"
-        self.logger.error(error_msg, exc_info=True)
-        
-        # نسخ احتياطي للملف التالف
-        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-        corrupted_file = f"state_corrupted_{timestamp}.json"
-        shutil.copyfile(state_file, corrupted_file)
-        
-        self.logger.info(f"تم إنشاء نسخة احتياطية من الملف التالف: {corrupted_file}")
-        
-        # تهيئة الحالة الافتراضية
-        self._initialize_default_state()
-        
-        self.send_notification(
-            'error',
-            f"❌ خطأ في تحميل الحالة\n"
-            f"📛 {type(error).__name__}\n"
-            f"💾 تم الاستعادة للافتراضي\n"
-            f"⏰ {datetime.now().strftime('%H:%M')}"
-        )
+            self.current_positions = {}
+            self.last_peaks = {}
+            self.trailing_stops = {}
+            print(f"❌ خطأ غير متوقع أثناء تحميل الحالة: {e}")
+            self.send_notification('error', f"❌ خطأ غير متوقع أثناء تحميل الحالة: {e}")
 
     def handle_binance_error(self, e):
         """معالجة أخطاء Binance المحددة"""
@@ -3069,7 +2856,7 @@ class TradingBot:
         if symbol not in self.last_peaks or current_price > self.last_peaks[symbol]:
             self.last_peaks[symbol] = current_price
 
-        trailing_stop = self.last_peaks[symbo] * (1 - self.trailing_percent / 100)
+        trailing_stop = self.last_peaks[symbol] * (1 - self.trailing_percent / 100)
         self.trailing_stops[symbol] = trailing_stop
         return trailing_stop
 
@@ -3211,137 +2998,95 @@ class TradingBot:
 
     def load_or_initialize_model(self, symbol, use_cache=True):
         """
-        نسخة محسنة تماماً مع:
-        - التحقق من صحة الملف
-        - اختبار النموذج قبل التسليم
-        - نظام طوارئ متكامل
+        نسخة محسنة تماماً من دالة تحميل النموذج مع:
+        - التحقق من وجود مجلد النماذج
+        - معالجة جميع الأخطاء الممكنة
+        - إنشاء المجلد إذا لم يكن موجوداً
+        - ضمان عدم حدوث أي أخطاء
         """
         try:
-            # 1. التحقق من وجود مجلد النماذج
+            # 1. التحقق من وجود مجلد 'models' أو إنشائه
             models_dir = 'models'
-            if not os.path.exists(models_dir):
-                os.makedirs(models_dir)
-                raise FileNotFoundError(f"تم إنشاء مجلد النماذج جديدًا لـ {symbol}")
+            os.makedirs(models_dir, exist_ok=True)
             
+            # 2. المسار الكامل للملف
             model_path = os.path.join(models_dir, f'xgb_model_{symbol}.pkl')
             
-            # 2. إذا كان النموذج في الذاكرة المؤقتة
-            if use_cache and hasattr(self, '_model_cache') and symbol in self._model_cache:
-                cached_model = self._model_cache[symbol]
-                if self._validate_model(cached_model):
-                    return cached_model
-            
-            # 3. إذا لم يوجد ملف، ننشئ نموذجًا جديدًا
+            # 3. التحقق من وجود الملف
             if not os.path.exists(model_path):
-                self.logger.warning(f"ملف النموذج غير موجود لـ {symbol}، سيتم إنشاء نموذج جديد")
-                new_model = self.train_ml_model(symbol)  # سيحاول تدريب نموذج جديد
-                if new_model is None:
-                    raise ValueError(f"فشل تدريب نموذج جديد لـ {symbol}")
-                return new_model
-            
-            # 4. تحميل النموذج مع التحقق من صحته
-            with open(model_path, 'rb') as f:
-                model = joblib.load(f)
-            
-            if not self._validate_model(model):
-                raise ValueError(f"النموذج المحمل لـ {symbol} غير صالح")
-            
-            # 5. اختبار أداء النموذج
-            test_result = self._test_model_performance(model)
-            if not test_result['success']:
-                raise ValueError(f"أداء النموذج غير مقبول: {test_result['message']}")
-            
-            # 6. التخزين في الذاكرة المؤقتة إذا طلب
-            if use_cache:
-                if not hasattr(self, '_model_cache'):
-                    self._model_cache = OrderedDict()
-                    self._max_cached_models = 3
-                
-                self._model_cache[symbol] = model
-                self._clean_model_cache()
-            
-            return model
-            
-        except Exception as e:
-            self.logger.error(f"فشل تحميل/تهيئة النموذج لـ {symbol}: {str(e)}", exc_info=True)
-            raise  # نعيد رفع الاستثناء للتعامل معه في المستوى الأعلى
+                error_msg = f"⚠️ ملف النموذج لـ {symbol} غير موجود في المسار: {model_path}"
+                self.logger.warning(error_msg)
+                self.send_notification('warning', error_msg)
+                return None
 
-    def _validate_model(self, model):
-        """نسخة محسنة تجمع بين الميزات"""
-        # التحقق من الدوال الأساسية
-        required_methods = ['predict', 'predict_proba', 'fit']
+            # 4. محاولة تحميل النموذج
+            try:
+                with open(model_path, 'rb') as f:
+                    model = joblib.load(f)
+                    
+                # 5. التحقق من صحة النموذج
+                required_methods = ['predict', 'predict_proba', 'fit']
+                for method in required_methods:
+                    if not hasattr(model, method):
+                        raise AttributeError(f"النموذج لا يحتوي على الدالة المطلوبة: {method}")
+                
+                # 6. اختبار تنبؤ تجريبي
+                dummy_data = pd.DataFrame([[0]*7], columns=[
+                    'ema20', 'ema50', 'rsi', 'macd',
+                    'volume', 'news_sentiment', 'signal_count'
+                ])
+                model.predict(dummy_data)  # إذا فشل هنا سيرفع استثناء
+                
+                # 7. التخزين في الذاكرة المؤقتة إذا طلب
+                if use_cache:
+                    if not hasattr(self, '_model_cache'):
+                        self._model_cache = OrderedDict()
+                        self._max_cached_models = 3
+                    
+                    self._model_cache[symbol] = model
+                    self._clean_model_cache()
+                
+                return model
+                
+            except Exception as load_error:
+                error_msg = f"فشل تحميل النموذج لـ {symbol}: {str(load_error)}"
+                self.logger.error(error_msg, exc_info=True)
+                
+                # نقل الملف التالف إلى مجلد الأخطاء
+                corrupted_dir = os.path.join(models_dir, 'corrupted')
+                os.makedirs(corrupted_dir, exist_ok=True)
+                corrupted_path = os.path.join(
+                    corrupted_dir,
+                    f'corrupted_{symbol}_{datetime.now().strftime("%Y%m%d_%H%M%S")}.pkl'
+                )
+                shutil.move(model_path, corrupted_path)
+                
+                self.send_notification(
+                    'error',
+                    f"🚨 نموذج تالف لـ {symbol}\n"
+                    f"تم نقله إلى: {corrupted_path}"
+                )
+                return None
+                
+        except Exception as e:
+            error_msg = f"فشل غير متوقع في تحميل النموذج لـ {symbol}: {str(e)}"
+            self.logger.critical(error_msg, exc_info=True)
+            self.send_notification('error', error_msg[:200])
+            return None
+
+    def _validate_model_structure(self, model):
+        """التحقق من هيكل النموذج والمتطلبات"""
+        required_methods = ['predict', 'fit']
         for method in required_methods:
             if not hasattr(model, method):
-                self.logger.error(f"النموذج يفتقد إلى الدالة: {method}")
-                return False
+                raise AttributeError(f"النموذج يفتقد إلى الدالة الضرورية: {method}")
 
-        # تحقق إضافي للنماذج من نوع Pipeline
+        # إذا كان النموذج من نوع Pipeline
         if hasattr(model, 'steps'):
             last_step = model.steps[-1][1]
             if not hasattr(last_step, 'feature_importances_'):
-                self.logger.warning("النموذج قد لا يكون من نوع XGBClassifier")
-                # يمكن إضافة إشعار هنا إن أردت
-
-        return True
-
-    def _test_model_performance(self, model):
-        """اختبار أداء النموذج على بيانات اختبارية"""
-        try:
-            # إنشاء بيانات اختبار وهمية
-            test_data = pd.DataFrame(np.random.rand(5, 7), columns=[
-                'ema20', 'ema50', 'rsi', 'macd',
-                'volume', 'news_sentiment', 'signal_count'
-            ])
-
-            # الاختبار الأساسي
-            predictions = model.predict(test_data)
-            if predictions is None or len(predictions) != 5:
-                return {
-                    'success': False,
-                    'message': "فشل في توليد التنبؤات"
-                }
-
-            # إذا كان النموذج يحتوي على predict_proba
-            if hasattr(model, 'predict_proba'):
-                probas = model.predict_proba(test_data)
-                if probas is None or not np.all(np.isfinite(probas)):
-                    return {
-                        'success': False,
-                        'message': "قيم احتمالية غير صالحة"
-                    }
-
-            return {'success': True, 'message': "النموذج صالح"}
-
-        except Exception as e:
-            return {
-                'success': False,
-                'message': f"فشل اختبار الأداء: {str(e)}"
-            }
-
-    def monitor_model_performance(self):
-        """مراقبة أداء النماذج بشكل دوري"""
-        for symbol, model in self.models.items():
-            try:
-                # جلب بيانات حديثة للاختبار
-                recent_data = self.collect_recent_data(symbol)
-                if recent_data is None or recent_data.empty:
-                    continue
-
-                # تقييم الأداء
-                performance = self.evaluate_model(model, recent_data)
-
-                # إذا كان الأداء تحت عتبة معينة، إعادة التدريب
-                if performance['accuracy'] < 0.6:  # مثال لعتبة الأدنى
-                    self.logger.warning(
-                        f"أداء النموذج لـ {symbol} منخفض ({performance['accuracy']:.2f})، سيتم إعادة التدريب"
-                    )
-                    self.retrain_model(symbol)
-
-            except Exception as e:
-                self.logger.error(
-                    f"فشل مراقبة أداء النموذج لـ {symbol}: {str(e)}",
-                    exc_info=True
-                )
+                self.send_notification('warning',
+                    "النموذج قد لا يكون من نوع XGBClassifier")
 
     def initialize_and_train_model(self):
         """
