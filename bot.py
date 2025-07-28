@@ -84,6 +84,7 @@ class TradingBot:
         self.news_fetch_interval_hours = 12
         self.last_news_fetch_time = datetime.min
         self.optimal_trading_hours = []
+        self._news_cache = {}
 
         # تهيئة القواميس الخاصة بالتحليل والإشارات
         self.news_sentiment = {
@@ -119,12 +120,12 @@ class TradingBot:
             self.logger.critical("فشل تهيئة APIs - الخطأ: %s", str(e), exc_info=True)
             self.send_notification(
                 'error',
-                "🔥 فشل حرج في تهيئة APIs\n"
-                "📛 التفاصيل: %s\n"
-                "⏰ الوقت: %s" % (str(e), datetime.now().strftime('%Y-%m-%d %H:%M:%S'))
+                f"🔥 فشل حرج في تهيئة APIs\n"
+                f"📛 التفاصيل: {str(e)}\n"
+                f"⏰ الوقت: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"
             )
-            self.shutdown_bot(reason="فشل تهيئة APIs: %s" % str(e))
-            raise RuntimeError("فشل تهيئة APIs - تم إيقاف البوت. الخطأ الأصلي: %s" % str(e)) from e
+            self.shutdown_bot(reason=f"فشل تهيئة APIs: {str(e)}")
+            raise RuntimeError(f"فشل تهيئة APIs - تم إيقاف البوت. الخطأ الأصلي: {str(e)}") from e
 
         # تحميل الحالة العامة والمؤشرات
         self.load_state()
@@ -173,10 +174,9 @@ class TradingBot:
                     self.logger.critical("تم إنشاء نموذج طوارئ لـ %s", symbol)
                     
                     self.send_notification(
-                        'warning',
-                        "⚠️ تحذير: تم استخدام نموذج طوارئ لـ %s\n"
-                        "السبب: %s" % (symbol, str(e)[:150])
-                    )
+                           'warning',
+                           f"⚠️ تحذير: تم استخدام نموذج طوارئ لـ {symbol}\nالسبب: {str(e)[:150]}"
+                     )
                     
                 except Exception as emergency_error:
                     self.logger.critical(
@@ -184,8 +184,8 @@ class TradingBot:
                         symbol, str(emergency_error),
                         exc_info=True
                     )
-                    self.shutdown_bot(reason="فشل حرج في تحميل النماذج: %s" % str(emergency_error))
-                    raise RuntimeError("لا يمكن المتابعة بدون نموذج لـ %s" % symbol) from emergency_error
+                    self.shutdown_bot(reason=f"فشل حرج في تحميل النماذج: {str(emergency_error)}")
+                    raise RuntimeError(f"لا يمكن المتابعة بدون نموذج لـ {symbol}") from emergency_error
 
     def initialize_fallback_model(self):
         """إنشاء نموذج بديل أساسي في حال فشل التحميل"""
@@ -268,7 +268,7 @@ class TradingBot:
             self.logger.info("✅ تم تهيئة نظام التسجيل بنجاح")
 
         except Exception as e:
-            """نظام الطوارئ عند فشل تهيئة نظام التسجيل"""
+          #نظام الطوارئ عند فشل تهيئة نظام التسجيل
             try:
                 # أ. تهيئة أساسيات logging
                 logging.basicConfig(
@@ -285,11 +285,7 @@ class TradingBot:
                 emergency_logger.setLevel(logging.DEBUG)
 
                 # ج. تسجيل التفاصيل الكاملة للخطأ
-                emergency_logger.critical(
-                    f"فشل تهيئة نظام التسجيل الرئيسي | الخطأ: {str(e)}",
-                    exc_info=True
-                )
-
+                emergency_logger.critical("فشل تهيئة نظام التسجيل الرئيسي | الخطأ: %s", str(e), exc_info=True)
                 # د. تعيين logger الطوارئ للنظام
                 self.logger = emergency_logger
 
@@ -1134,9 +1130,6 @@ class TradingBot:
 
     def _get_cached_news(self, key, max_hours):
         """استرجاع البيانات المخزنة مؤقتًا إذا كانت حديثة"""
-        if not hasattr(self, '_news_cache'):
-            self._news_cache = {}
-            
         cached = self._news_cache.get(key)
         if cached:
             last_updated = datetime.fromisoformat(cached['last_updated'])
@@ -1146,8 +1139,6 @@ class TradingBot:
 
     def _cache_news(self, key, data):
         """تخزين البيانات مؤقتًا"""
-        if not hasattr(self, '_news_cache'):
-            self._news_cache = {}
         self._news_cache[key] = data
 
     def scrape_twitter_news(self, symbol=None):
@@ -1385,13 +1376,6 @@ class TradingBot:
         except Exception as e:
             self.send_notification('error', f"❌ فشل تحميل مؤشر التدوير: {e}")
             self.rotation_index = 0
-
-    def round_quantity(self, quantity, step_size, min_qty=1e-6):
-        """
-        تقريب الكمية للأسفل لأقرب مضاعف للـ step_size، والتحقق أنها ≥ minQty.
-        """
-        rounded_qty = float(np.floor(quantity / step_size) * step_size)
-        return rounded_qty if rounded_qty >= min_qty else 0
 
     @staticmethod
     def round_quantity(quantity, step_size, min_qty=1e-6):
@@ -1713,11 +1697,10 @@ class TradingBot:
 
     def handle_binance_error(self, e):
         """معالجة أخطاء Binance المحددة"""
-        if isinstance(e, binance.exceptions.BinanceAPIException):
-            if e.code == -1003:  # Rate limit exceeded
-                self.send_notification('warning', "تم تجاوز معدل الطلبات لـ Binance - الانتظار 60 ثانية")
-                time.sleep(60)
-                return True  # للإشارة لإعادة المحاولة
+        if isinstance(e, binance.exceptions.BinanceAPIException) and e.code == -1003:
+            self.send_notification('warning', "تم تجاوز معدل الطلبات لـ Binance - الانتظار 60 ثانية")
+            time.sleep(60)
+            return True  # للإشارة لإعادة المحاولة
         return False
 
     def safe_api_request(self, request_func, service_name, rate_limit=None, max_retries=3):
@@ -1754,7 +1737,6 @@ class TradingBot:
     @staticmethod
     def _retry_api_request(request_func, *args, max_retries=3, base_delay=1, logger=None, **kwargs):
         """الجزء الخاص بإعادة المحاولة"""
-        import time
         for attempt in range(max_retries):
             try:
                 response = request_func(*args, **kwargs)
@@ -2300,17 +2282,17 @@ class TradingBot:
         if not all(k in analysis for k in ['5m', '15m', '1h']):
             return False
 
+        # استخراج القيم لتقليل التكرار
+        rsi_5m = analysis['5m']['rsi']
+        rsi_15m = analysis['15m']['rsi']
+        macd_5m = analysis['5m']['macd']
+        macd_15m = analysis['15m']['macd']
+
         # تباعد RSI
-        rsi_divergence = (
-            (analysis['5m']['rsi'] > 70 and analysis['15m']['rsi'] < 50) or
-            (analysis['5m']['rsi'] < 30 and analysis['15m']['rsi'] > 50)
-        )
+        rsi_divergence = (rsi_5m > 70 > rsi_15m) or (rsi_5m < 30 < rsi_15m)
 
         # تباعد MACD
-        macd_divergence = (
-            (analysis['5m']['macd'] > 0 and analysis['15m']['macd'] < 0) or
-            (analysis['5m']['macd'] < 0 and analysis['15m']['macd'] > 0)
-        )
+        macd_divergence = (macd_5m > 0 > macd_15m) or (macd_5m < 0 < macd_15m)
 
         return rsi_divergence or macd_divergence
 
@@ -2404,24 +2386,15 @@ class TradingBot:
             return {'error': str(e)}
 
     def optimize_entry_conditions(self, symbol: str, test_periods: list = None) -> dict:
-        if test_periods is None:
-            test_periods = [30, 60, 90]
         """
         تحسين معايير الدخول باستخدام البحث الشبكي مع تقييم متعدد المقاييس
 
         التحسينات الرئيسية:
-        1. استخدام GridSearchCV للبحث عن أفضل المعايير
-        2. تقييم متعدد المقاييس (الدقة، الربحية، نسبة الربح/الخسارة)
-        3. تحليل تواقيت السوق المثلى
-        4. معالجة متقدمة للبيانات التاريخية
-
-        Parameters:
-            symbol: رمز العملة المراد تحسينها
-            test_periods: قائمة بفترات الاختبار بالأيام
-
-        Returns:
-            dict: نتائج التحسين مع أفضل المعايير
+        - تحليل عدة فترات زمنية
+        - اختيار المعلمات المثلى بناءً على الأداء
         """
+        if test_periods is None:
+            test_periods = [30, 60, 90]
         try:
             # 1. تحميل بيانات التدريب
             data = self._load_training_data(symbol)
@@ -2868,8 +2841,7 @@ class TradingBot:
                 self.update_news_sentiment(symbol)
                 self.logger.debug("تم تحديث أخبار %s", symbol)
             except Exception as news_error:
-                error_msg = "أخبار %s | %s: %s" % (symbol, type(news_error).__name__, str(news_error))
-                self.logger.error(error_msg, exc_info=True)
+                self.logger.error(f"أخبار {symbol} | {type(news_error).__name__}: {str(news_error)}", exc_info=True)
                 self.send_notification('warning', f"⚠️ أخبار {symbol[:4]}...")
 
             # ===== 2. تحديث الإشارات الاحترافية =====
@@ -2879,20 +2851,17 @@ class TradingBot:
                 signal_count_after = len(self.pro_signals.get(symbol, []))
                 self.logger.debug("إشارات %s: %d جديدة", symbol, signal_count_after - signal_count_before)
             except Exception as signal_error:
-                error_msg = "إشارات %s | %s: %s" % (symbol, type(signal_error).__name__, str(signal_error))
-                self.logger.error(error_msg, exc_info=True)
+                self.logger.error(f"إشارات {symbol} | {type(signal_error).__name__}: {str(signal_error)}", exc_info=True)
 
             # ===== 3. جلب البيانات الأساسية (5m) =====
             try:
                 df_5m = self.get_historical_data(symbol, interval='5m', limit=100)
                 if df_5m is None or df_5m.empty:
-                    error_msg = "بيانات %s (5m) فارغة" % symbol
-                    self.logger.error(error_msg)
+                    self.logger.error(f"بيانات {symbol} (5m) فارغة")
                     self.send_notification('warning', f"📉 بيانات {symbol[:4]} (5m)...")
                     return
             except Exception as data_error:
-                error_msg = "بيانات %s | %s: %s" % (symbol, type(data_error).__name__, str(data_error))
-                self.logger.critical(error_msg, exc_info=True)
+                self.logger.critical(f"بيانات {symbol} | {type(data_error).__name__}: {str(data_error)}", exc_info=True)
                 self.send_notification('error', f"❌ بيانات {symbol[:4]}...")
                 return
 
@@ -2902,7 +2871,7 @@ class TradingBot:
                 required_indicators = ['ema20', 'ema50', 'rsi', 'macd']
                 if not all(col in df_5m.columns for col in required_indicators):
                     missing = [col for col in required_indicators if col not in df_5m.columns]
-                    raise ValueError("مؤشرات فنية ناقصة: %s" % missing)
+                    raise ValueError(f"مؤشرات فنية ناقصة: {missing}")
 
                 self.logger.debug(
                     "تحليل %s (5m): EMA20=%.4f, RSI=%.2f",
@@ -2911,8 +2880,7 @@ class TradingBot:
                     df_5m['rsi'].iloc[-1]
                 )
             except Exception as ta_error:
-                error_msg = "تحليل فني %s | %s: %s" % (symbol, type(ta_error).__name__, str(ta_error))
-                self.logger.error(error_msg, exc_info=True)
+                self.logger.error("تحليل فني %s | %s: %s", symbol, type(ta_error).__name__, str(ta_error), exc_info=True)
                 self.send_notification('error', f"📊 تحليل {symbol[:4]}...")
                 return
 
@@ -2923,8 +2891,7 @@ class TradingBot:
                 if not timeframe_analysis:
                     self.logger.warning("تحليل الأطر الزمنية لـ %s لم يعط نتائج", symbol)
             except Exception as timeframe_error:
-                error_msg = "أطر زمنية %s | %s: %s" % (symbol, type(timeframe_error).__name__, str(timeframe_error))
-                self.logger.error(error_msg, exc_info=True)
+                self.logger.error("أطر زمنية %s | %s: %s", symbol, type(timeframe_error).__name__, str(timeframe_error), exc_info=True)
 
             # ===== 6. تقييم شروط الدخول =====
             try:
@@ -2940,16 +2907,13 @@ class TradingBot:
                         else:
                             self.logger.warning("فشل تنفيذ شراء %s", symbol)
                     except Exception as order_error:
-                        error_msg = "تنفيذ أمر %s | %s: %s" % (symbol, type(order_error).__name__, str(order_error))
-                        self.logger.error(error_msg, exc_info=True)
+                        self.logger.error("تنفيذ أمر %s | %s: %s", symbol, type(order_error).__name__, str(order_error), exc_info=True)
                         self.send_notification('error', f"💸 تنفيذ {symbol[:4]}...")
             except Exception as evaluation_error:
-                error_msg = "تقييم %s | %s: %s" % (symbol, type(evaluation_error).__name__, str(evaluation_error))
-                self.logger.error(error_msg, exc_info=True)
+                self.logger.error("تقييم %s | %s: %s", symbol, type(evaluation_error).__name__, str(evaluation_error), exc_info=True)
 
         except Exception as global_error:
-            error_msg = "فشل عام في %s | %s: %s" % (symbol, type(global_error).__name__, str(global_error))
-            self.logger.critical(error_msg, exc_info=True)
+            self.logger.critical("فشل عام في %s | %s: %s", symbol, type(global_error).__name__, str(global_error), exc_info=True)
             self.send_notification(
                 'error',
                 f"⛔ فشل في {symbol[:4]}\n"
@@ -3270,10 +3234,7 @@ class TradingBot:
             return False
 
         except Exception as e:
-            self.logger.critical(
-                f"فشل غير متوقع في تقييم شروط الدخول لـ {symbol}: {str(e)}",
-                exc_info=True
-            )
+            self.logger.critical("فشل غير متوقع في تقييم شروط الدخول لـ %s: %s", symbol, str(e), exc_info=True)
             return False
 
     def load_or_initialize_model(self, symbol, use_cache=True):
@@ -3585,20 +3546,16 @@ class TradingBot:
                 
                 if not all(col in df.columns for col in required_columns):
                     missing = [col for col in required_columns if col not in df.columns]
-                    error_msg = "أعمدة مفقودة: %s" % ', '.join(missing)
-                    self.logger.error("%s", error_msg)
-                    raise ValueError(error_msg)
+                    self.logger.error("أعمدة مفقودة: %s", ', '.join(missing))
+                    raise ValueError(f"أعمدة مفقودة: {', '.join(missing)}")
 
                 df = df.dropna(subset=required_columns)
                 if len(df) < 100:  # حد أدنى 100 صف للتدريب
-                    error_msg = "بيانات تدريب غير كافية (%d صف فقط)" % len(df)
-                    self.logger.error("%s", error_msg)
-                    raise ValueError(error_msg)
+                    self.logger.error("بيانات تدريب غير كافية (%d صف فقط)", len(df))
+                    raise ValueError(f"بيانات تدريب غير كافية ({len(df)} صف فقط)")
 
             except Exception as load_error:
-                error_msg = "تحميل بيانات التدريب | %s: %s" % (type(load_error).__name__, str(load_error))
-                self.logger.error(error_msg, exc_info=True)
-                raise
+                self.logger.error("تحميل بيانات التدريب | %s: %s", type(load_error).__name__, str(load_error), exc_info=True); raise
 
             # 3. تقسيم البيانات
             try:
@@ -3612,9 +3569,7 @@ class TradingBot:
                     stratify=y
                 )
             except Exception as split_error:
-                error_msg = "تقسيم البيانات | %s: %s" % (type(split_error).__name__, str(split_error))
-                self.logger.error(error_msg, exc_info=True)
-                raise
+                self.logger.error("تقسيم البيانات | %s: %s", type(split_error).__name__, str(split_error), exc_info=True); raise
 
             # 4. إنشاء وتدريب النموذج
             try:
@@ -3632,9 +3587,7 @@ class TradingBot:
                 
                 model.fit(X_train, y_train)
             except Exception as train_error:
-                error_msg = "تدريب النموذج | %s: %s" % (type(train_error).__name__, str(train_error))
-                self.logger.error(error_msg, exc_info=True)
-                raise
+                self.logger.error("تدريب النموذج | %s: %s", type(train_error).__name__, str(train_error), exc_info=True); raise
 
             # 5. تقييم النموذج
             try:
@@ -3656,9 +3609,7 @@ class TradingBot:
                     symbol, metrics['accuracy'], metrics['precision'], metrics['recall']
                 )
             except Exception as eval_error:
-                error_msg = "تقييم النموذج | %s: %s" % (type(eval_error).__name__, str(eval_error))
-                self.logger.error(error_msg, exc_info=True)
-                raise
+                self.logger.error("تقييم النموذج | %s: %s", type(eval_error).__name__, str(eval_error), exc_info=True); raise
 
             # 6. حفظ النموذج
             try:
@@ -3672,9 +3623,7 @@ class TradingBot:
                 self.logger.info("تم حفظ النموذج في %s", model_path)
                 
             except Exception as save_error:
-                error_msg = "حفظ النموذج | %s: %s" % (type(save_error).__name__, str(save_error))
-                self.logger.error(error_msg, exc_info=True)
-                raise
+                self.logger.error("حفظ النموذج | %s: %s", type(save_error).__name__, str(save_error), exc_info=True); raise
 
             # 7. إرسال تقرير النجاح
             self.send_notification(
@@ -3692,7 +3641,7 @@ class TradingBot:
 
         except Exception as e:
             error_msg = "فشل تدريب النموذج لـ %s: %s: %s" % (symbol, type(e).__name__, str(e))
-            self.logger.critical(error_msg, exc_info=True)
+            self.logger.critical("فشل تدريب النموذج لـ %s: %s: %s", symbol, type(e).__name__, str(e), exc_info=True)
             self.send_notification(
                 'error',
                 f"❌ فشل تدريب {symbol}\n"
@@ -3844,7 +3793,6 @@ class TradingBot:
                 chat_id=chat_id,
                 text=message,
                 parse_mode=telegram.constants.ParseMode.MARKDOWN,
-                timeout=10
             )
             return True
 
@@ -3890,7 +3838,6 @@ class TradingBot:
                     chat_id=chat_id,
                     text=message,
                     parse_mode=ParseMode.MARKDOWN,
-                    timeout=10,
                     disable_web_page_preview=True
                 )
                 return True
@@ -3989,7 +3936,7 @@ class TradingBot:
                     chat_id=chat_id,
                     text=message,
                     parse_mode=ParseMode.MARKDOWN,
-                    timeout=10
+                  
                 )
                 return
             except NetworkError:
