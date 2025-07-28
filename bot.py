@@ -2841,7 +2841,7 @@ class TradingBot:
                 self.update_news_sentiment(symbol)
                 self.logger.debug("تم تحديث أخبار %s", symbol)
             except Exception as news_error:
-                self.logger.error(f"أخبار {symbol} | {type(news_error).__name__}: {str(news_error)}", exc_info=True)
+                self.logger.error("أخبار %s | %s: %s", symbol, type(news_error).__name__, str(news_error), exc_info=True)
                 self.send_notification('warning', f"⚠️ أخبار {symbol[:4]}...")
 
             # ===== 2. تحديث الإشارات الاحترافية =====
@@ -2851,17 +2851,17 @@ class TradingBot:
                 signal_count_after = len(self.pro_signals.get(symbol, []))
                 self.logger.debug("إشارات %s: %d جديدة", symbol, signal_count_after - signal_count_before)
             except Exception as signal_error:
-                self.logger.error(f"إشارات {symbol} | {type(signal_error).__name__}: {str(signal_error)}", exc_info=True)
+                self.logger.error("إشارات %s | %s: %s", symbol, type(signal_error).__name__, str(signal_error), exc_info=True)
 
             # ===== 3. جلب البيانات الأساسية (5m) =====
             try:
                 df_5m = self.get_historical_data(symbol, interval='5m', limit=100)
                 if df_5m is None or df_5m.empty:
-                    self.logger.error(f"بيانات {symbol} (5m) فارغة")
+                    self.logger.error("بيانات %s (5m) فارغة", symbol)
                     self.send_notification('warning', f"📉 بيانات {symbol[:4]} (5m)...")
                     return
             except Exception as data_error:
-                self.logger.critical(f"بيانات {symbol} | {type(data_error).__name__}: {str(data_error)}", exc_info=True)
+                self.logger.critical("بيانات %s | %s: %s", symbol, type(data_error).__name__, str(data_error), exc_info=True)
                 self.send_notification('error', f"❌ بيانات {symbol[:4]}...")
                 return
 
@@ -3640,7 +3640,7 @@ class TradingBot:
             raise  # نعيد رفع الخطأ للتعامل معه في المستوى الأعلى
 
         except Exception as e:
-            error_msg = "فشل تدريب النموذج لـ %s: %s: %s" % (symbol, type(e).__name__, str(e))
+            error_msg = f"فشل تدريب النموذج لـ {symbol}: {type(e).__name__}: {str(e)}"
             self.logger.critical("فشل تدريب النموذج لـ %s: %s: %s", symbol, type(e).__name__, str(e), exc_info=True)
             self.send_notification(
                 'error',
