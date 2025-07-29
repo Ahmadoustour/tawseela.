@@ -1568,7 +1568,7 @@ class TradingBot:
                 try:
                     logging.basicConfig(level=logging.CRITICAL)
                     logging.critical("Total failure: %s\nOriginal error: %s", logging_error, e)
-                except Exception as e:
+                except Exception as fallback_error:
                     sys.stderr.write(f"[ULTIMATE FALLBACK] State save failed: {e}\n")
 
     def load_state(self):
@@ -3052,7 +3052,7 @@ class TradingBot:
             if pd.isna(high) or pd.isna(low):
                 raise ValueError("قيم high/low غير صالحة")
 
-            diff = high - low
+            dif = high - low
             if diff <= 0:
                 raise ValueError("فرق غير صالح بين high و low")
 
@@ -3824,7 +3824,7 @@ class TradingBot:
                         f.write(f"[{datetime.now()}] {full_msg}\n")
                 except Exception as e:
                     print(f"[FALLBACK] {full_msg}")
-        except Exception as e:
+        except Exception:
             print(f"[CRITICAL] فشل تسجيل الخطأ: {str(e)} | الرسالة الأصلية: {error_msg}")
 
     def _safe_send_to_telegram(self, chat_id, message, notification_type, max_retries=3):
