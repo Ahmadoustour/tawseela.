@@ -105,8 +105,8 @@ class TradingBot:
         self.pivot_points = {symbol: None for symbol in self.symbols}
 
         # إعدادات التداول
-        self.min_profit = 0.55
-        self.trailing_percent = 0.2
+        self.min_profit = 0.4
+        self.trailing_percent = 0.1
         self.min_expected_profit = 0.6  
 
         # تهيئة نظام التسجيل
