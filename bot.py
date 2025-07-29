@@ -1568,7 +1568,7 @@ class TradingBot:
                 try:
                     logging.basicConfig(level=logging.CRITICAL)
                     logging.critical("Total failure: %s\nOriginal error: %s", logging_error, e)
-                except:
+                except Exception as e:
                     sys.stderr.write(f"[ULTIMATE FALLBACK] State save failed: {e}\n")
 
     def load_state(self):
@@ -3822,7 +3822,7 @@ class TradingBot:
                 try:
                     with open('emergency_errors.log', 'a', encoding='utf-8') as f:
                         f.write(f"[{datetime.now()}] {full_msg}\n")
-                except:
+                except Exception as e:
                     print(f"[FALLBACK] {full_msg}")
         except Exception as e:
             print(f"[CRITICAL] فشل تسجيل الخطأ: {str(e)} | الرسالة الأصلية: {error_msg}")
@@ -3881,12 +3881,12 @@ class TradingBot:
             try:
                 with open('notification_errors.jsonl', 'a', encoding='utf-8') as f:
                     f.write(json.dumps(log_entry, ensure_ascii=False) + '\n')
-            except:
+            except Exception:
                 with open('notification_errors.log', 'a', encoding='utf-8') as f:
                     f.write(f"{log_entry['timestamp']} | {error_type} | {error_details}\n")
 
-        except:
-            print(f"EMERGENCY: {error_type} - {error_details}")
+        except Exception as e:
+            print(f"EMERGENCY: {error_type} - {error_details} | {str(e)}")
 
     def _create_notification_message(self, notification_type, data):
         """إنشاء محتوى الرسالة بناءً على نوع الإشعار"""
