@@ -3475,6 +3475,7 @@ class TradingBot:
             'Open Positions Ratio': (new_metrics['open_positions_ratio'], current_metrics['open_positions_ratio'] if current_metrics else 1),
             'Final Balance': (new_metrics['final_balance'], current_metrics['final_balance'] if current_metrics else 0)
         }
+        self.logger.debug("📊 مقارنة النموذجين:\n%s", comparison_metrics)
         
         # اتخاذ القرار
         if not current_model:
@@ -3501,16 +3502,16 @@ class TradingBot:
             # 2. التحقق من التغيرات المفاجئة
             price_change = df['close'].pct_change().abs()
             if (price_change > 0.15).any():  # تغير أكثر من 15% في يوم واحد
-                self.logger.warning(f"تقلبات غير طبيعية في {symbol}")
+                self.logger.warning("تقلبات غير طبيعية في %s", symbol)
                 
             # 3. التحقق من حجم التداول
             volume_change = df['volume'].pct_change().abs()
             if (volume_change > 3).any():  # تغير حجم التداول بأكثر من 300%
-                self.logger.warning(f"حجم تداول غير طبيعي في {symbol}")
+                self.logger.warning("حجم تداول غير طبيعي في %s", symbol)
                 
             return True
         except Exception as e:
-            self.logger.error(f"فشل في التحقق من بيانات {symbol}: {str(e)}")
+            self.logger.error("فشل في التحقق من بيانات %s: %s", symbol, str(e))
             return False
 
     def adaptive_training_schedule(self):
@@ -3528,7 +3529,7 @@ class TradingBot:
                     schedule.every(3).days.do(self.retrain_model, symbol).tag(f'training_{symbol}')
                     
             except Exception as e:
-                self.logger.error(f"فشل في جدولة تدريب {symbol}: {str(e)}")
+                self.logger.error("فشل في جدولة تدريب %s: %s", symbol, str(e))
 
     def enhanced_backtesting(self, symbol, model, initial_balance=1000):
         try:
@@ -3588,7 +3589,7 @@ class TradingBot:
             }
             
         except Exception as e:
-            self.logger.error(f"فشل في اختبار {symbol}: {str(e)}")
+            self.logger.error("فشل في اختبار %s: %s", symbol, str(e))
             return None
 
     def validate_system(self):
@@ -4107,20 +4108,20 @@ class TradingBot:
                         # اتخاذ القرار مع الاستراتيجية التكيفية
                         if prediction == 1:
                             if use_aggressive:  # من الإصدار القديم
-                                self.execute_trade(symbol, aggressive=True)
+                                self.execute_trade(symbol)
                             else:
                                 self.execute_trade(symbol)
 
                     # إدارة المراكز المفتوحة (المحدثة)
-                    self.manage_positions()
+                    self.manage_all_positions()
                     
                     # فاصل زمني بين الدورات
                     time.sleep(60)
 
                 except Exception as e:
-                    self.logger.critical(f"خطأ في الدورة الرئيسية: {str(e)}", exc_info=True)
+                    self.logger.critical("خطأ في الدورة الرئيسية: %s", str(e), exc_info=True)
                     time.sleep(300)  # انتظار أطول عند الأخطاء الحرجة
 
         except Exception as e:
-            self.logger.error(f"انهيار في دالة run: {str(e)}", exc_info=True)
+            self.logger.error("انهيار في دالة run: %s", str(e), exc_info=True)
             self.shutdown_bot(reason=f"خطأ حرج: {type(e).__name__}")
