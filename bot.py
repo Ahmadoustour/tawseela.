@@ -809,30 +809,17 @@ class TradingBot:
         return signals
 
     def start_scheduler(self):
-        """
-        بدء الجدولة بأقل تعقيد ممكن
-        """
+        """بدء الجدولة بدون تدريب أسبوعي"""
         if self.is_running:
             return  # إذا كانت تعمل لا نعيد تشغيلها
 
         self.is_running = True
 
         def scheduler_loop():
-            last_optimization = None
             while self.is_running:  # الشرط الجديد
                 try:
                     schedule.run_pending()
-
-                    # التحسين الأسبوعي (يبقى كما هو)
-                    now = datetime.now()
-                    if now.weekday() == 6 and now.hour == 2 and (
-                        last_optimization is None or (now - last_optimization).days >= 7
-                    ):
-                        self._run_weekly_optimization()
-                        last_optimization = now
-
                     time.sleep(1)
-
                 except Exception as e:
                     self.logger.error("خطأ في الجدولة: %s", e)
                     time.sleep(5)
@@ -3474,6 +3461,136 @@ class TradingBot:
             self.logger.error("فشل تحديث بيانات التدريب: %s", str(e), exc_info=True)
             self.send_notification('error', f'❌ فشل تحديث بيانات التدريب لـ {symbol}: {e}')
 
+    def compare_models(self, new_model, current_model, X_test, y_test):
+        # تقييم النموذج الجديد
+        new_metrics = self.evaluate_model(new_model, X_test, y_test)
+        
+        # تقييم النموذج الحالي (إن وجد)
+        current_metrics = self.evaluate_model(current_model, X_test, y_test) if current_model else None
+        
+        # معايير المقارنة
+        comparison_metrics = {
+            'Closed Win Rate': (new_metrics['closed_win_rate'], current_metrics['closed_win_rate'] if current_metrics else 0),
+            'Avg Holding Time': (new_metrics['avg_holding_time'], current_metrics['avg_holding_time'] if current_metrics else float('inf')),
+            'Open Positions Ratio': (new_metrics['open_positions_ratio'], current_metrics['open_positions_ratio'] if current_metrics else 1),
+            'Final Balance': (new_metrics['final_balance'], current_metrics['final_balance'] if current_metrics else 0)
+        }
+        
+        # اتخاذ القرار
+        if not current_model:
+            return True  # قبول النموذج الجديد إذا لم يكن هناك نموذج حال
+            
+        improve_threshold = 1.2  # يجب أن يكون النموذج الجديد أفضل بنسبة 20% على الأقل
+        improvement_score = (
+            (new_metrics['closed_win_rate'] / current_metrics['closed_win_rate']) * 0.4 +
+            (current_metrics['avg_holding_time'] / new_metrics['avg_holding_time']) * 0.3 +
+            (current_metrics['open_positions_ratio'] / new_metrics['open_positions_ratio']) * 0.2 +
+            (new_metrics['final_balance'] / current_metrics['final_balance']) * 0.1
+        )
+        
+        return improvement_score >= improve_threshold
+
+    def validate_daily_data(self, symbol):
+        try:
+            df = self.get_historical_data(symbol, interval='1d', limit=30)
+            
+            # 1. التحقق من اكتمال البيانات
+            if df.isnull().any().any():
+                raise ValueError("يوجد بيانات ناقصة")
+                
+            # 2. التحقق من التغيرات المفاجئة
+            price_change = df['close'].pct_change().abs()
+            if (price_change > 0.15).any():  # تغير أكثر من 15% في يوم واحد
+                self.logger.warning(f"تقلبات غير طبيعية في {symbol}")
+                
+            # 3. التحقق من حجم التداول
+            volume_change = df['volume'].pct_change().abs()
+            if (volume_change > 3).any():  # تغير حجم التداول بأكثر من 300%
+                self.logger.warning(f"حجم تداول غير طبيعي في {symbol}")
+                
+            return True
+        except Exception as e:
+            self.logger.error(f"فشل في التحقق من بيانات {symbol}: {str(e)}")
+            return False
+
+    def adaptive_training_schedule(self):
+        for symbol in self.symbols:
+            try:
+                df = self.get_historical_data(symbol, interval='1h', limit=24*7)  # أسبوع من البيانات
+                
+                # حساب التقلبات
+                volatility = df['close'].std() / df['close'].mean()
+                
+                # تحديد وتيرة التدريب
+                if volatility > 0.05:  # تقلبات عالية
+                    schedule.every(12).hours.do(self.retrain_model, symbol).tag(f'training_{symbol}')
+                else:  # تقلبات منخفضة
+                    schedule.every(3).days.do(self.retrain_model, symbol).tag(f'training_{symbol}')
+                    
+            except Exception as e:
+                self.logger.error(f"فشل في جدولة تدريب {symbol}: {str(e)}")
+
+    def enhanced_backtesting(self, symbol, model, initial_balance=1000):
+        try:
+            df = self.get_historical_data(symbol, interval='1h', limit=1000)  # ~40 يوم من البيانات
+            df = self.calculate_technical_indicators(df)
+            
+            balance = initial_balance
+            open_positions = []
+            closed_positions = []
+            
+            for i in range(1, len(df)):
+                current_data = df.iloc[i]
+                last_data = df.iloc[i-1]
+                
+                # 1. محاولة إغلاق الصفقات المفتوحة عند تحقيق ربح 2%
+                for pos in open_positions[:]:
+                    if current_data['close'] >= pos['entry_price'] * 1.02:
+                        profit = pos['quantity'] * (current_data['close'] - pos['entry_price'])
+                        balance += profit
+                        closed_positions.append({
+                            'entry_price': pos['entry_price'],
+                            'exit_price': current_data['close'],
+                            'duration': i - pos['entry_index'],
+                            'profit': profit
+                        })
+                        open_positions.remove(pos)
+                
+                # 2. فتح صفقة جديدة إذا كانت إشارة الشراء قوية
+                input_data = pd.DataFrame([[ 
+                    last_data['ema20'], last_data['ema50'], last_data['rsi'],
+                    last_data['macd'], last_data['volume'],
+                    self.news_sentiment.get(symbol, {}).get('score', 0),
+                    len(self.pro_signals.get(symbol, []))
+                ]], columns=['ema20', 'ema50', 'rsi', 'macd', 'volume', 'news_sentiment', 'signal_count'])
+                
+                if model.predict(input_data)[0] == 1 and balance > 10:
+                    quantity = (balance * 0.1) / current_data['close']  # استثمار 10% من الرصيد
+                    open_positions.append({
+                        'entry_price': current_data['close'],
+                        'quantity': quantity,
+                        'entry_index': i
+                    })
+                    balance -= quantity * current_data['close']
+            
+            # حساب المقاييس
+            win_rate = len([p for p in closed_positions if p['profit'] > 0]) / len(closed_positions) if closed_positions else 0
+            avg_holding_time = np.mean([p['duration'] for p in closed_positions]) if closed_positions else 0
+            open_ratio = len(open_positions) / (len(closed_positions) + len(open_positions))
+            
+            return {
+                'symbol': symbol,
+                'closed_win_rate': win_rate,
+                'avg_holding_time': avg_holding_time,
+                'open_positions_ratio': open_ratio,
+                'final_balance': balance + sum(pos['quantity'] * df.iloc[-1]['close'] for pos in open_positions),
+                'total_trades': len(closed_positions) + len(open_positions)
+            }
+            
+        except Exception as e:
+            self.logger.error(f"فشل في اختبار {symbol}: {str(e)}")
+            return None
+
     def validate_system(self):
         """التحقق من صحة جميع المكونات قبل البدء"""
         errors = []
@@ -3945,65 +4062,65 @@ class TradingBot:
                 time.sleep(5)
 
     def run(self):
-        """الدورة الرئيسية المحدثة مع التحليل الزمني وإدارة الأخطاء المتكاملة"""
+        """الدورة الرئيسية المحدثة مع جميع التحسينات"""
         try:
-            # 1. تهيئة الجدولة الأساسية
-            schedule.every(15).minutes.do(self.generate_performance_report)
-            schedule.every(1).hours.do(self.rotate_data_sources)
-            schedule.every().day.at("02:00").do(self.retrain_model)
-            schedule.every().sunday.at("02:30").do(
-                lambda: [
-                    self.optimize_entry_conditions(symbol)
-                    for symbol in self.symbols
-                ]
-            )
+            # 1. التحقق من جودة البيانات اليومية
+            for symbol in self.symbols:
+                if not self.validate_daily_data(symbol):
+                    self.send_notification('error', f"بيانات {symbol} غير صالحة!")
             
-            # 2. جدولة التحليل الزمني الأسبوعي (إضافة جديدة)
-            schedule.every().monday.at("03:00").do(
-                self.analyze_market_timing
-            )
+            # 2. تهيئة الجدولة الذكية
+            self.adaptive_training_schedule()  # الجدولة التكيفية الجديدة
+            schedule.every(15).minutes.do(self.generate_performance_report)  # من الإصدار القديم
+            schedule.every(1).hours.do(self.rotate_data_sources)  # من الإصدار القديم
+            schedule.every().monday.at("03:00").do(self.analyze_market_timing)  # من الإصدار القديم
             
             self.start_bot()
-            
-            # 3. بدء جدولة المهام في خلفية thread منفصل
-            self.start_scheduler()
+            self.start_scheduler()  # تشغيل الجدولة في خيط منفصل
 
+            # 3. الدورة الرئيسية
             while self.is_running:
                 try:
-                    # 4. التحقق من الاتصال بالإنترنت
+                    # التحقق من الاتصال بالإنترنت
                     if not self.check_internet_connection():
                         self.handle_connection_loss()
                         continue
 
-                    # 5. تطبيق التحليل الزمني في قرارات التداول (إضافة جديدة)
+                    # تطبيق التحليل الزمني (من الإصدار القديم)
                     current_hour = datetime.now().hour
                     use_aggressive = current_hour in self.optimal_trading_hours
                     
-                    # 6. معالجة كل عملة في thread منفصل مع تطبيق الإعدادات المناسبة
-                    threads = []
+                    # معالجة كل عملة مع دمج الميزات الجديدة
                     for symbol in self.symbols:
-                        thread = threading.Thread(
-                            target=self._process_coin_with_strategy,
-                            args=(symbol, use_aggressive),
-                            daemon=True
-                        )
-                        threads.append(thread)
-                        thread.start()
+                        # جمع البيانات مع التحقق الجديد
+                        df = self.collect_market_data(symbol)
+                        if df is None or df.empty:
+                            continue
+                        
+                        # التحليل الفني المحدث
+                        df = self.calculate_technical_indicators(df)
+                        
+                        # التنبؤ باستخدام النموذج
+                        input_data = self.prepare_input_data(df)
+                        prediction = self.models[symbol].predict(input_data)
+                        
+                        # اتخاذ القرار مع الاستراتيجية التكيفية
+                        if prediction == 1:
+                            if use_aggressive:  # من الإصدار القديم
+                                self.execute_trade(symbol, aggressive=True)
+                            else:
+                                self.execute_trade(symbol)
 
-                    # 7. انتظار انتهاء جميع threads
-                    for thread in threads:
-                        thread.join(timeout=300)  # مهلة 5 دقائق لكل thread
-
-                    # 8. إدارة المراكز المفتوحة
-                    self.manage_all_positions()
-
-                    # 9. فاصل زمني بين الدورات
+                    # إدارة المراكز المفتوحة (المحدثة)
+                    self.manage_positions()
+                    
+                    # فاصل زمني بين الدورات
                     time.sleep(60)
 
                 except Exception as e:
-                    self.logger.critical("خطأ في الدورة الرئيسية: %s", str(e), exc_info=True)
-                    time.sleep(30)  # انتظار 30 ثانية قبل إعادة المحاولة
+                    self.logger.critical(f"خطأ في الدورة الرئيسية: {str(e)}", exc_info=True)
+                    time.sleep(300)  # انتظار أطول عند الأخطاء الحرجة
 
         except Exception as e:
-            self.logger.error("انهيار في دالة run: %s", str(e), exc_info=True)
+            self.logger.error(f"انهيار في دالة run: {str(e)}", exc_info=True)
             self.shutdown_bot(reason=f"خطأ حرج: {type(e).__name__}")
