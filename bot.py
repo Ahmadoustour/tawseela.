@@ -3502,7 +3502,7 @@ class TradingBot:
             # 2. التحقق من التغيرات المفاجئة
             price_change = df['close'].pct_change().abs()
             if (price_change > 0.15).any():  # تغير أكثر من 15% في يوم واحد
-                self.logger.warning("تقلبات غير طبيعية في %s", symbol)
+                self.logger.warning("تقلبات غي� طبيعية في %s", symbol)
                 
             # 3. التحقق من حجم التداول
             volume_change = df['volume'].pct_change().abs()
@@ -4107,11 +4107,8 @@ class TradingBot:
                         
                         # اتخاذ القرار مع الاستراتيجية التكيفية
                         if prediction == 1:
-                            if use_aggressive:  # من الإصدار القديم
-                                self.execute_trade(symbol)
-                            else:
-                                self.execute_trade(symbol)
-
+                            self.execute_trade(symbol)
+                            
                     # إدارة المراكز المفتوحة (المحدثة)
                     self.manage_all_positions()
                     
