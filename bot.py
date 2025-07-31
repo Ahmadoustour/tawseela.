@@ -3313,9 +3313,9 @@ class TradingBot:
     def _test_model_performance(model):
         """اختبار أداء النموذج على بيانات اختبارية"""
         try:
-            rng = np.random.default_rng()  # إنشاء مولد أعداد عشوائية حديث
+            rng = np.random.default_rng(42)  # ✅ تعيين seed ثابت لضمان تكرار النتائج
             test_data = pd.DataFrame(
-                rng.random((5, 7)),  # استخدام المولد الحديث بدلاً من np.random.rand
+                rng.random((5, 7)),  # بيانات اختبار عشوائية
                 columns=[
                     'ema20', 'ema50', 'rsi', 'macd',
                     'volume', 'news_sentiment', 'signal_count'
@@ -3330,7 +3330,7 @@ class TradingBot:
                     'message': "فشل في توليد التنبؤات"
                 }
 
-            # إذا كان النموذج يحتوي على predict_proba
+            # التحقق من وجود احتمالات صالحة إذا كانت متاحة
             if hasattr(model, 'predict_proba'):
                 probas = model.predict_proba(test_data)
                 if probas is None or not np.all(np.isfinite(probas)):
