@@ -207,7 +207,7 @@ class TradingBot:
                 ))
             ], memory=self.memory)
 
-            rng = np.random.default_rng()
+            rng = np.random.default_rng(42)  # تعيين seed ثابت
             dummy_x = pd.DataFrame(
                 rng.random((10, 7)),
                 columns=[
@@ -222,7 +222,7 @@ class TradingBot:
             return model
 
         except Exception as e:
-            self.logger.error("فشل إنشاء نموذج بديل: %s", str(e), exc_info=True)
+            print(f"فشل إنشاء نموذج بديل: {e}")
             raise RuntimeError("لا يمكن إنشاء نموذج بديل") from e
 
     def _init_logging(self):
@@ -739,7 +739,7 @@ class TradingBot:
             params = {
                 'max_results': count,
                 'exclude': 'replies,retweets',
-                TWEET_FIELDS_KEY: 'created_at,text'
+                self.TWEET_FIELDS_KEY: 'created_at,text'
             }
 
             tweets_response = requests.get(tweets_url, headers=headers, params=params)
@@ -1163,7 +1163,7 @@ class TradingBot:
             params = {
                 'query': query + ' -is:retweet -is:reply',
                 'max_results': 15,
-                TWEET_FIELDS_KEY: 'created_at,text,author_id',
+                self.TWEET_FIELDS_KEY: 'created_at,text,author_id',
                 'expansions': 'author_id',
                 'user.fields': 'username'
             }
@@ -1220,7 +1220,7 @@ class TradingBot:
             params = {
                 'query': query,
                 'max_results': count,
-                'TWEET_FIELDS_KEY': 'created_at,author_id,text',
+                self.TWEET_FIELDS_KEY: 'created_at,author_id,text',
                 'expansions': 'author_id',
                 'user.fields': 'username,name'
             }
@@ -1352,7 +1352,7 @@ class TradingBot:
         حفظ قيمة rotation_index في ملف أو قاعدة بيانات بسيطة ليتم استرجاعها عند إعادة تشغيل البوت.
         """
         try:
-            with open(ROTATION_INDEX_FILE, 'w') as f:
+            with open(self.ROTATION_INDEX_FILE, 'w') as f:
                 json.dump({'rotation_index': self.rotation_index}, f)
         except Exception as e:
             self.send_notification('error', f"❌ فشل حفظ مؤشر التدوير: {e}")
@@ -1362,8 +1362,8 @@ class TradingBot:
         تحميل قيمة rotation_index من الملف عند بدء تشغيل البوت.
         """
         try:
-            if os.path.exists(ROTATION_INDEX_FILE):
-                with open(ROTATION_INDEX_FILE, 'r') as f:
+            if os.path.exists(self.ROTATION_INDEX_FILE):
+                with open(self.ROTATION_INDEX_FILE, 'r') as f:
                     data = json.load(f)
                     self.rotation_index = data.get('rotation_index', 0)
             else:
@@ -1730,7 +1730,7 @@ class TradingBot:
                 raise
 
     @staticmethod
-    def _retry_api_request(self, request_func, *args, max_retries=3, base_delay=1, logger=None, **kwargs):
+    def _retry_api_request(request_func, *args, max_retries=3, base_delay=1, logger=None, **kwargs):
         """الجزء الخاص بإعادة المحاولة"""
         for attempt in range(max_retries):
             try:
@@ -1833,7 +1833,6 @@ class TradingBot:
             # 1. جلب بيانات الشموع (الساعة الماضية)
             data = self.safe_api_request(
                 lambda: self.client.get_historical_klines(symbol, '1h', '1 day ago UTC'),
-                service_name='binance_klines',
                 rate_limit=1
             )
 
@@ -1858,7 +1857,7 @@ class TradingBot:
                     type='MARKET',
                     quantity=self.calculate_quantity(symbol)
                 ),
-                service_name='binance_order',
+                
                 rate_limit=0.5
             )
             return order
@@ -2037,7 +2036,7 @@ class TradingBot:
         return Pipeline([
             ('scaler', StandardScaler()),
             ('xgb', XGBClassifier(
-                objective=TradingBot.OBJECTIVE_BINARY,
+                objective=TradingBot.self.OBJECTIVE_BINARY,
                 learning_rate=0.05,
                 max_depth=5,
                 n_estimators=300,
@@ -2645,7 +2644,7 @@ class TradingBot:
         try:
             return self.safe_api_request(
                 fetch_balance,
-                service_name='binance',
+                
                 rate_limit=0.5  # طلبين في الثانية كحد أقصى
             )
         except Exception as e:
@@ -2963,7 +2962,7 @@ class TradingBot:
                         position=position,
                         profit=profit_percent,
                         duration=duration,
-                        reason="Both conditions met"
+                        
                     )
 
             except binance.exceptions.BinanceAPIException as e:
@@ -3314,11 +3313,14 @@ class TradingBot:
     def _test_model_performance(model):
         """اختبار أداء النموذج على بيانات اختبارية"""
         try:
-            # إنشاء بيانات اختبار وهمية
-            test_data = pd.DataFrame(np.random.rand(5, 7), columns=[
-                'ema20', 'ema50', 'rsi', 'macd',
-                'volume', 'news_sentiment', 'signal_count'
-            ])
+            rng = np.random.default_rng()  # إنشاء مولد أعداد عشوائية حديث
+            test_data = pd.DataFrame(
+                rng.random((5, 7)),  # استخدام المولد الحديث بدلاً من np.random.rand
+                columns=[
+                    'ema20', 'ema50', 'rsi', 'macd',
+                    'volume', 'news_sentiment', 'signal_count'
+                ]
+            )
 
             # الاختبار الأساسي
             predictions = model.predict(test_data)
@@ -3705,7 +3707,7 @@ class TradingBot:
                 model = Pipeline([
                     ('scaler', StandardScaler()),
                     ('xgb', XGBClassifier(
-                        objective=OBJECTIVE_BINARY,
+                        objective=self.OBJECTIVE_BINARY,
                         learning_rate=0.1,
                         max_depth=6,
                         n_estimators=200,
@@ -4097,10 +4099,6 @@ class TradingBot:
                     if not self.check_internet_connection():
                         self.handle_connection_loss()
                         continue
-
-                    # تطبيق التحليل الزمني (من الإصدار القديم)
-                    current_hour = datetime.now().hour
-                    
                     # معالجة كل عملة مع دمج الميزات الجديدة
                     for symbol in self.symbols:
                         # جمع البيانات مع التحقق الجديد
