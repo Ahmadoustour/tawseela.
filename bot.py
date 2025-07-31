@@ -1022,7 +1022,7 @@ class TradingBot:
                     "positive": positive,
                     "negative": negative,
                     "neutral": neutral,
-                    "last_updated": datetime.now(timezone.utc).isoformat()
+                    "last_updated": datetime.now(timezone.utc).isoformat(),
                     "source": "newsapi"
                 }
                 
@@ -1080,7 +1080,7 @@ class TradingBot:
                 "positive": sum(1 for r in results if r['sentiment'] > 0.1),
                 "negative": sum(1 for r in results if r['sentiment'] < -0.1),
                 "neutral": sum(1 for r in results if -0.1 <= r['sentiment'] <= 0.1),
-                "last_updated": datetime.now(timezone.utc).isoformat()
+                "last_updated": datetime.now(timezone.utc).isoformat(),
                 "source": "coindesk"
             }
             
