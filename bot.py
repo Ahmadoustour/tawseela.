@@ -19,7 +19,7 @@ import psutil
 import holidays
 import sklearn
 from logging.handlers import RotatingFileHandler
-from datetime import datetime, timedelta, time
+from datetime import datetime, timedelta, time, timezone
 from binance.client import Client
 from binance.exceptions import BinanceAPIException
 from telegram import Bot
@@ -40,6 +40,7 @@ from concurrent.futures import ThreadPoolExecutor
 from telegram.error import NetworkError
 from sklearn.model_selection import train_test_split, GridSearchCV, TimeSeriesSplit
 from collections import OrderedDict
+from joblib import Memory
 # تحميل المتغيرات البيئية
 load_dotenv()
 
@@ -67,6 +68,7 @@ class InvalidResponseError(APIError):
     """استجابة غير صالحة"""
     
 class TradingBot:
+
     def __init__(self):
         # تهيئة جميع السمات الأساسية أولاً
         self.lock = Lock()
@@ -80,11 +82,15 @@ class TradingBot:
         self.last_api_call = {}
         self._model_cache = OrderedDict()
         self._max_cached_models = 3
-        self.news_rotation_indices = {symbol: 0 for symbol in self.symbols}
+        self.news_rotation_indices = dict.fromkeys(self.symbols, 0)
         self.news_fetch_interval_hours = 12
         self.last_news_fetch_time = datetime.min
         self.optimal_trading_hours = []
         self._news_cache = {}
+        self.memory = Memory(location='./cachedir', verbose=0)  # خاصية ثابتة للكلاس
+        self.ROTATION_INDEX_FILE = 'rotation_index.json'
+        self.TWEET_FIELDS_KEY = 'tweet.fields'
+        self.OBJECTIVE_BINARY = 'binary:logistic'
 
         # تهيئة القواميس الخاصة بالتحليل والإشارات
         self.news_sentiment = {
@@ -99,10 +105,10 @@ class TradingBot:
         }
 
         self.pro_signals = {symbol: [] for symbol in self.symbols}
-        self.trailing_stops = {symbol: None for symbol in self.symbols}
-        self.last_peaks = {symbol: None for symbol in self.symbols}
-        self.fib_levels = {symbol: None for symbol in self.symbols}
-        self.pivot_points = {symbol: None for symbol in self.symbols}
+        self.trailing_stops = dict.fromkeys(self.symbols, None)
+        self.last_peaks = dict.fromkeys(self.symbols, None)
+        self.fib_levels = dict.fromkeys(self.symbols, None)
+        self.pivot_points = dict.fromkeys(self.symbols, None)
 
         # إعدادات التداول
         self.min_profit = 0.4
@@ -193,26 +199,28 @@ class TradingBot:
             model = Pipeline([
                 ('scaler', StandardScaler()),
                 ('xgb', XGBClassifier(
-                    objective='binary:logistic',
+                    objective=self.OBJECTIVE_BINARY,
                     learning_rate=0.05,
                     max_depth=3,
                     n_estimators=100,
                     random_state=42
                 ))
-            ])
-            
-            # إنشاء بيانات تدريب وهمية أساسية
-            dummy_X = pd.DataFrame(np.random.rand(10, 7), columns=[
-                'ema20', 'ema50', 'rsi', 'macd',
-                'volume', 'news_sentiment', 'signal_count'
-            ])
-            dummy_y = np.random.randint(0, 2, 10)
-            
-            # تدريب سريع على بيانات وهمية
-            model.fit(dummy_X, dummy_y)
-            
+            ], memory=self.memory)
+
+            rng = np.random.default_rng()
+            dummy_x = pd.DataFrame(
+                rng.random((10, 7)),
+                columns=[
+                    'ema20', 'ema50', 'rsi', 'macd',
+                    'volume', 'news_sentiment', 'signal_count'
+                ]
+            )
+            dummy_y = rng.integers(0, 2, size=10)
+
+            model.fit(dummy_x, dummy_y)
+
             return model
-            
+
         except Exception as e:
             self.logger.error("فشل إنشاء نموذج بديل: %s", str(e), exc_info=True)
             raise RuntimeError("لا يمكن إنشاء نموذج بديل") from e
@@ -731,7 +739,7 @@ class TradingBot:
             params = {
                 'max_results': count,
                 'exclude': 'replies,retweets',
-                'tweet.fields': 'created_at,text'
+                TWEET_FIELDS_KEY: 'created_at,text'
             }
 
             tweets_response = requests.get(tweets_url, headers=headers, params=params)
@@ -895,7 +903,7 @@ class TradingBot:
                     'positive': sum(1 for _ in range(count) if _ > 0.1),
                     'negative': sum(1 for _ in range(count) if _ < -0.1),
                     'neutral': sum(1 for _ in range(count) if -0.1 <= _ <= 0.1),
-                    'last_updated': datetime.utcnow().isoformat(),
+                    'last_updated': datetime.now(timezone.utc).isoformat(),
                     'source': 'combined'
                 }
 
@@ -948,7 +956,7 @@ class TradingBot:
                 "positive": positive,
                 "negative": negative,
                 "neutral": neutral,
-                "last_updated": datetime.utcnow().isoformat(),
+                "last_updated": datetime.now(timezone.utc).isoformat(),
                 "source": "cryptopanic"
             }
             
@@ -1014,7 +1022,7 @@ class TradingBot:
                     "positive": positive,
                     "negative": negative,
                     "neutral": neutral,
-                    "last_updated": datetime.utcnow().isoformat(),
+                    "last_updated": datetime.now(timezone.utc).isoformat()
                     "source": "newsapi"
                 }
                 
@@ -1072,7 +1080,7 @@ class TradingBot:
                 "positive": sum(1 for r in results if r['sentiment'] > 0.1),
                 "negative": sum(1 for r in results if r['sentiment'] < -0.1),
                 "neutral": sum(1 for r in results if -0.1 <= r['sentiment'] <= 0.1),
-                "last_updated": datetime.utcnow().isoformat(),
+                "last_updated": datetime.now(timezone.utc).isoformat()
                 "source": "coindesk"
             }
             
@@ -1120,7 +1128,7 @@ class TradingBot:
         cached = self._news_cache.get(key)
         if cached:
             last_updated = datetime.fromisoformat(cached['last_updated'])
-            if (datetime.utcnow() - last_updated) < timedelta(hours=max_hours):
+            if (datetime.now(timezone.utc) - last_updated) < timedelta(hours=max_hours):
                 return cached
         return None
 
@@ -1155,7 +1163,7 @@ class TradingBot:
             params = {
                 'query': query + ' -is:retweet -is:reply',
                 'max_results': 15,
-                'tweet.fields': 'created_at,text,author_id',
+                TWEET_FIELDS_KEY: 'created_at,text,author_id',
                 'expansions': 'author_id',
                 'user.fields': 'username'
             }
@@ -1212,7 +1220,7 @@ class TradingBot:
             params = {
                 'query': query,
                 'max_results': count,
-                'tweet.fields': 'created_at,author_id,text',
+                'TWEET_FIELDS_KEY': 'created_at,author_id,text',
                 'expansions': 'author_id',
                 'user.fields': 'username,name'
             }
@@ -1344,7 +1352,7 @@ class TradingBot:
         حفظ قيمة rotation_index في ملف أو قاعدة بيانات بسيطة ليتم استرجاعها عند إعادة تشغيل البوت.
         """
         try:
-            with open('rotation_index.json', 'w') as f:
+            with open(ROTATION_INDEX_FILE, 'w') as f:
                 json.dump({'rotation_index': self.rotation_index}, f)
         except Exception as e:
             self.send_notification('error', f"❌ فشل حفظ مؤشر التدوير: {e}")
@@ -1354,8 +1362,8 @@ class TradingBot:
         تحميل قيمة rotation_index من الملف عند بدء تشغيل البوت.
         """
         try:
-            if os.path.exists('rotation_index.json'):
-                with open('rotation_index.json', 'r') as f:
+            if os.path.exists(ROTATION_INDEX_FILE):
+                with open(ROTATION_INDEX_FILE, 'r') as f:
                     data = json.load(f)
                     self.rotation_index = data.get('rotation_index', 0)
             else:
@@ -1397,7 +1405,7 @@ class TradingBot:
             self.send_notification('error', f'⚠️ فشل تحديث معنويات الأخبار لـ {symbol}: {e}')
             self.news_sentiment[symbol] = {"score": 0}  # القيمة الافتراضية
 
-    def calculate_quantity(self, symbol, risk_percent=0.02):
+    def calculate_quantity(self, symbol):
         """حساب الكمية بشكل ديناميكي مع مراعاة الحدود"""
         try:
             # 1. الحصول على الرصيد والسعر
@@ -1690,7 +1698,7 @@ class TradingBot:
             return True  # للإشارة لإعادة المحاولة
         return False
 
-    def safe_api_request(self, request_func, service_name, rate_limit=None, max_retries=3):
+    def safe_api_request(self, request_func, rate_limit=None, max_retries=3):
         """نسخة محسنة مع تتبع المسار الكامل للأخطاء"""
         if rate_limit and rate_limit > 0:
            time.sleep(1.0 / rate_limit)
@@ -1722,13 +1730,16 @@ class TradingBot:
                 raise
 
     @staticmethod
-    def _retry_api_request(request_func, *args, max_retries=3, base_delay=1, logger=None, **kwargs):
+    def _retry_api_request(self, request_func, *args, max_retries=3, base_delay=1, logger=None, **kwargs):
         """الجزء الخاص بإعادة المحاولة"""
         for attempt in range(max_retries):
             try:
                 response = request_func(*args, **kwargs)
                 if hasattr(response, 'status_code') and response.status_code != 200:
-                    raise Exception(f"كود الخطأ: {response.status_code}")
+                    raise APIError(
+                        message=f"API response returned status code {response.status_code}",
+                        status_code=response.status_code
+                    )
                 return response
             except Exception as e:
                 if logger:
@@ -2026,7 +2037,7 @@ class TradingBot:
         return Pipeline([
             ('scaler', StandardScaler()),
             ('xgb', XGBClassifier(
-                objective='binary:logistic',
+                objective=TradingBot.OBJECTIVE_BINARY,
                 learning_rate=0.05,
                 max_depth=5,
                 n_estimators=300,
@@ -2035,7 +2046,7 @@ class TradingBot:
                 random_state=42,
                 eval_metric='logloss'
             ))
-        ])
+        ], memory=TradingBot.memory)
 
     def retrain_model(self, symbol):        
             self.train_ml_model(symbol)  # سيتم التدريب لكل عملة على حدة
@@ -2046,7 +2057,7 @@ class TradingBot:
 
             try:
                 df = pd.read_csv(file_path)
-                df.dropna(inplace=True)
+                df = df.dropna()
 
                 required_columns = [
                     'ema20', 'ema50', 'rsi', 'macd',
@@ -2922,7 +2933,7 @@ class TradingBot:
         if not self.current_positions:
             return
 
-        for symbol, position in list(self.current_positions.items()):
+        for symbol, position in self.current_positions.items():
             if not position:
                 continue
 
@@ -2965,7 +2976,7 @@ class TradingBot:
                 self.logger.error(error_msg, exc_info=True)
                 self.send_notification('error', error_msg[:200])
 
-    def _execute_sell_order(self, symbol, price, position, profit, duration, reason=None):
+    def _execute_sell_order(self, symbol, price, position, profit, duration):
         """
         تنفيذ أمر بيع آمن مع تنظيف كامل للبيانات
 
@@ -3367,13 +3378,13 @@ class TradingBot:
         model = Pipeline([
             ('scaler', StandardScaler()),
             ('xgb', XGBClassifier(
-                objective='binary:logistic',
+                objective=self.OBJECTIVE_BINARY,
                 learning_rate=0.1,
                 max_depth=6,
                 n_estimators=200,
                 random_state=42
             ))
-        ])
+        ], memory=self.memory)
 
         data_path = 'training_data.csv'
         if not os.path.exists(data_path):
@@ -3502,7 +3513,7 @@ class TradingBot:
             # 2. التحقق من التغيرات المفاجئة
             price_change = df['close'].pct_change().abs()
             if (price_change > 0.15).any():  # تغير أكثر من 15% في يوم واحد
-                self.logger.warning("تقلبات غي� طبيعية في %s", symbol)
+                self.logger.warning("تقلبات غير طبيعية في %s", symbol)
                 
             # 3. التحقق من حجم التداول
             volume_change = df['volume'].pct_change().abs()
@@ -3694,14 +3705,14 @@ class TradingBot:
                 model = Pipeline([
                     ('scaler', StandardScaler()),
                     ('xgb', XGBClassifier(
-                        objective='binary:logistic',
+                        objective=OBJECTIVE_BINARY,
                         learning_rate=0.1,
                         max_depth=6,
                         n_estimators=200,
                         random_state=42,
                         eval_metric='logloss'
                     ))
-                ])
+                ], memory=self.memory)  # ← ✅ هذا هو المطلوب
                 
                 model.fit(X_train, y_train)
             except Exception as train_error:
@@ -3848,7 +3859,7 @@ class TradingBot:
                 raise ValueError("أعمدة البيانات المطلوبة مفقودة")
                 
             new_data = {
-                'timestamp': datetime.utcnow().isoformat(),
+                'timestamp': datetime.now(timezone.utc).isoformat()  # ✅ timezone-aware
                 **{col: last_row[col] for col in required_columns},
                 'news_sentiment': self.news_sentiment.get(symbol, {}).get('score', 0),
                 'signal_count': len(self.pro_signals.get(symbol, [])),
@@ -4089,7 +4100,6 @@ class TradingBot:
 
                     # تطبيق التحليل الزمني (من الإصدار القديم)
                     current_hour = datetime.now().hour
-                    use_aggressive = current_hour in self.optimal_trading_hours
                     
                     # معالجة كل عملة مع دمج الميزات الجديدة
                     for symbol in self.symbols:
