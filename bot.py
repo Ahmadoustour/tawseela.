@@ -1370,7 +1370,7 @@ class TradingBot:
                     if test_response.status_code != 200:
                         return False
                 except requests.RequestException as e:
-                    self.logger.warning(f"NewsAPI request failed: {str(e)}")
+                    self.logger.warning("NewsAPI request failed: %s", str(e))
                     return False
 
             # 3. التحقق من البيانات الأساسية
