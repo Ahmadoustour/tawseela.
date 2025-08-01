@@ -359,58 +359,6 @@ class TradingBot:
             )
             return None
 
-    def _validate_news_sources(self):
-        """التحقق من صحة مصادر الأخبار مع ضمانات كاملة ودعم 5 مصادر"""
-        VALID_SOURCES = {
-            'telegram', 'twitter', 'coindesk', 
-            'cryptopanic', 'newsapi'
-        }
-
-        DEFAULT_SOURCES = [
-            'telegram', 'twitter', 'coindesk', 
-            'cryptopanic', 'newsapi'
-        ]
-
-        try:
-            if not hasattr(self, 'news_sources'):
-                self.news_sources = DEFAULT_SOURCES.copy()
-                self._log_reset("لم يتم تعريف مصادر الأخبار")
-                return
-
-            fixed_sources = []
-            problems = []
-
-            for src in self.news_sources:
-                clean_src = str(src).strip().lower() if src else ''
-                
-                if not clean_src:
-                    problems.append(f"مصدر فارغ: {src}")
-                    continue
-                    
-                if clean_src not in VALID_SOURCES:
-                    problems.append(f"مصدر غير معتمد: {clean_src}")
-                    continue
-                    
-                fixed_sources.append(clean_src)
-
-            if problems:
-                self.logger.warning("مشاكل في المصادر: %s", ', '.join(problems))
-
-            if not fixed_sources:
-                self.news_sources = DEFAULT_SOURCES.copy()
-                self._log_reset("لا توجد مصادر صالحة بعد التصفية")
-            else:
-                self.news_sources = list(dict.fromkeys(fixed_sources))
-                
-                for essential in ['twitter', 'telegram']:
-                    if essential not in self.news_sources:
-                        self.news_sources.append(essential)
-                        self.logger.info("أضيف مصدر أساسي: %s", essential)
-
-        except Exception as e:
-            self.logger.critical("فشل التحقق من المصادر: %s", str(e), exc_info=True)
-            self.news_sources = DEFAULT_SOURCES.copy()
-
     def _log_reset(self, reason):
         """تسجيل تفاصيل إعادة التعيين"""
         msg = f"تم ضبط مصادر الأخبار. السبب: {reason} | المصادر الجديدة: {self.news_sources}"
@@ -1337,15 +1285,124 @@ class TradingBot:
 
     def rotate_data_sources(self):
         """
-        تدوير مؤشر مصدر الأخبار كل 12 ساعة بحيث يتغير المصدر لكل العملات.
-        يتم حفظ المؤشر ويتم إرسال إشعار.
+        تدوير مصادر الأخبار مع التحقق من جودة وحداثة البيانات
         """
         try:
-            self.rotation_index = (self.rotation_index + 1) % len(self.news_sources)
+            # 1. التحقق من صحة المصادر الأساسية أولاً
+            if not hasattr(self, 'news_sources'):
+                self.news_sources = ['telegram', 'twitter', 'coindesk', 'cryptopanic', 'newsapi']
+                self._log_reset("لم يتم تعريف مصادر الأخبار")
+
+            # 2. الحصول على المصدر الحالي
+            current_source = self.news_sources[self.rotation_index]
+
+            # 3. التحقق من جودة المصدر الحالي قبل التدوير
+            if not self._validate_news_source(current_source):
+                self.logger.warning(f"المصدر الحالي غير صالح: {current_source}")
+                self.send_notification('warning', 
+                    f"⚠️ مشكلة في مصدر الأخبار الحالي: {current_source}")
+                
+                # تجاوز المصدر غير الصالح تلقائياً
+                self.rotation_index = (self.rotation_index + 1) % len(self.news_sources)
+                self.save_rotation_index()
+                return
+
+            # 4. تدوير المصادر مع التحقق من الجودة
+            original_index = self.rotation_index
+            next_index = (self.rotation_index + 1) % len(self.news_sources)
+            validated = False
+            attempts = 0
+
+            while attempts < len(self.news_sources):
+                next_source = self.news_sources[next_index]
+                
+                if self._validate_news_source(next_source):
+                    validated = True
+                    break
+                    
+                self.logger.warning(f"تم تخطي مصدر غير صالح: {next_source}")
+                next_index = (next_index + 1) % len(self.news_sources)
+                attempts += 1
+
+            # 5. إذا لم يتم العثور على مصدر صالح، نعود للمصدر الأصلي
+            if not validated:
+                self.logger.error("فشل في العثور على مصدر صالح، البقاء على المصدر الحالي")
+                return
+
+            # 6. التحديث النهائي
+            self.rotation_index = next_index
             self.save_rotation_index()
-            self.send_notification('update', f"تم تدوير مصادر الأخبار. المصدر الحالي: {self.news_sources[self.rotation_index]}")
+
+            # 7. تسجيل النتيجة
+            self.logger.info(f"تم التدوير من {current_source} إلى {next_source}")
+            self.send_notification('update', 
+                f"🔄 تم تدوير مصادر الأخبار\n"
+                f"المصدر الجديد: {next_source}\n"
+                f"المحاولات: {attempts+1}")
+
         except Exception as e:
-            self.send_notification('error', f'❌ فشل تدوير مصادر الأخبار: {e}')
+            self.logger.error(f"فشل في تدوير المصادر: {str(e)}", exc_info=True)
+            self.send_notification('error', 
+                f"❌ فشل تدوير مصادر الأخبار: {str(e)[:200]}")
+
+    def _validate_news_source(self, source):
+        """
+        التحقق من جودة وحداثة مصدر الأخبار
+        """
+        VALID_SOURCES = {'telegram', 'twitter', 'coindesk', 'cryptopanic', 'newsapi'}
+        if source not in VALID_SOURCES:
+            return False
+
+        try:
+            # 1. التحقق من الحداثة (مثال لـ Twitter)
+            if source == 'twitter':
+                last_tweet = self._get_last_tweet_time()
+                if last_tweet and (datetime.now() - last_tweet) > timedelta(hours=6):
+                    return False
+
+            # 2. التحقق من التوفر (مثال لـ NewsAPI)
+            elif source == 'newsapi':
+                try:
+                    test_response = requests.get(
+                        "https://newsapi.org/v2/top-headlines?" + 
+                        f"sources=crypto-coins-news&apiKey={os.getenv('NEWSAPI_KEY')}",
+                        timeout=10
+                    )
+                    if test_response.status_code != 200:
+                        return False
+                except:
+                    return False
+
+            # 3. التحقق من البيانات الأساسية
+            sample_data = self._fetch_sample_data(source)
+            if not sample_data or not self._is_data_valid(sample_data):
+                return False
+
+            return True
+
+        except Exception as e:
+            self.logger.warning(f"فشل التحقق من مصدر {source}: {str(e)}")
+            return False
+
+    def _is_data_valid(self, data):
+        """تحقق إضافي من صحة البيانات"""
+        required_fields = {
+            'telegram': ['text', 'timestamp'],
+            'twitter': ['text', 'created_at'],
+            'newsapi': ['title', 'publishedAt'],
+            'coindesk': ['title', 'time'],
+            'cryptopanic': ['title', 'published_at']
+        }
+
+        source_type = data.get('source_type')
+        if not source_type:
+            return False
+
+        for field in required_fields.get(source_type, []):
+            if field not in data:
+                return False
+
+        return True
 
     def save_rotation_index(self):
         """
@@ -1391,43 +1448,62 @@ class TradingBot:
     def update_news_sentiment(self, symbol):
         """
         تحديث درجة معنويات الأخبار لعملة معينة.
-        هذه الدالة تعتمد على analyze_news_sentiment التي يجب أن تُرجع رقمًا بين -1 و 1.
+        تقوم فقط بتحديث المفتاح "score" وتحتفظ بباقي البيانات الموجودة سابقًا.
         """
         try:
-            score = self.analyze_news_sentiment(symbol)  # تحتاج لتكون معرفة مسبقًا
+            # 1. تحليل المشاعر الجديدة
+            score = self.analyze_news_sentiment(symbol)
 
+            # 2. التحقق من وجود القاموس الأساسي
             if not hasattr(self, 'news_sentiment') or not isinstance(self.news_sentiment, dict):
                 self.news_sentiment = {}
 
-            self.news_sentiment[symbol] = {"score": score}
+            # 3. التحقق من وجود قاموس للرمز نفسه
+            if symbol not in self.news_sentiment or not isinstance(self.news_sentiment[symbol], dict):
+                self.news_sentiment[symbol] = {}
+
+            # 4. تحديث فقط القيمة الخاصة بـ score
+            self.news_sentiment[symbol]['score'] = score
 
         except Exception as e:
+            # 5. التعامل مع الخطأ وتعيين score = 0 فقط
             self.send_notification('error', f'⚠️ فشل تحديث معنويات الأخبار لـ {symbol}: {e}')
-            self.news_sentiment[symbol] = {"score": 0}  # القيمة الافتراضية
+            if symbol not in self.news_sentiment:
+                self.news_sentiment[symbol] = {}
+            self.news_sentiment[symbol]['score'] = 0
 
     def calculate_quantity(self, symbol):
-        """حساب الكمية بشكل ديناميكي مع مراعاة الحدود"""
         try:
             # 1. الحصول على الرصيد والسعر
             balance = float(self.client.get_asset_balance('USDT')['free'])
             ticker = self.client.get_symbol_ticker(symbol=symbol)
             current_price = float(ticker['price'])
             
-            # 2. حساب المبلغ المستثمر
-            investment = balance * 0.3
+            if current_price <= 0:
+                raise ValueError(f"سعر غير صالح: {current_price}")
             
-            # 3. الحصول على حدود التداول
-            step_size, min_qty = self.get_trade_limits(symbol)  # من دالتك السابقة
+            # 2. الحصول على حدود التداول
+            step_size, min_qty = self.get_trade_limits(symbol)
             
-            # 4. حساب الكمية مع التقريب
-            quantity = (investment / current_price) // step_size * step_size
+            # 3. حساب الكمية المطلوبة (30% من الرصيد)
+            quantity = (balance * 0.3) / current_price
             
-            # 5. التحقق من الحد الأدنى
-            return max(quantity, min_qty)
+            # 4. التقريب للأسفل حسب step_size
+            rounded_qty = float(np.floor(quantity / step_size) * step_size)
+            
+            # 5. التحقق من الحد الأدنى للكمية
+            if rounded_qty < min_qty:
+                self.logger.warning(
+                    f"الكمية المحسوبة ({rounded_qty}) أقل من الحد الأدنى ({min_qty}) لـ {symbol}"
+                )
+                return min_qty  # التنفيذ بأقل كمية مسموح بها
+            
+            return rounded_qty
             
         except Exception as e:
-            self.send_notification('error', f"فشل حساب الكمية لـ {symbol}: {str(e)}")
-            return 0  # تجنب الأخطاء عند التنفيذ
+            self.logger.error(f"فشل حساب الكمية لـ {symbol}: {str(e)}", exc_info=True)
+            self.send_notification('error', f"فشل حساب الكمية لـ {symbol}: {str(e)[:100]}")
+            return 0
 
     def update_pro_signals(self, symbol):
         """
@@ -1448,9 +1524,12 @@ class TradingBot:
 
     def generate_performance_report(self):
         """
-        إنشاء تقرير أداء شامل للبوت مع تحليل تنبؤات جميع النماذج
+        إنشاء تقرير أداء شامل للبوت مع تحليل تنبؤات جميع النماذج،
+        مع استخدام مستوى الثقة بدلاً من الاعتماد فقط على التنبؤ الثنائي.
         """
         try:
+            confidence_threshold = 0.65  # الحد الأدنى المقبول لاعتبار التنبؤ قويًا
+
             report_data = {
                 'timestamp': datetime.now().isoformat(),
                 'models': {},
@@ -1466,7 +1545,6 @@ class TradingBot:
                 if not model:
                     continue
 
-                # إنشاء بيانات الإدخال (النسخة المعدلة)
                 input_data = pd.DataFrame([[
                     0, 0, 50, 0, 1000000,
                     self.news_sentiment.get(symbol, {}).get('score', 0),
@@ -1476,21 +1554,30 @@ class TradingBot:
                     'volume', 'news_sentiment', 'signal_count'
                 ])
 
-                # زيادة عدد الإشارات النشطة
                 signal_count = len(self.pro_signals.get(symbol, []))
                 report_data['overall']['active_signals'] += signal_count
 
                 try:
-                    prediction = self.safe_model_prediction(model, input_data)
+                    prediction = model.predict(input_data)
+                    confidence = None
 
-                    if prediction is not None:
-                        prediction_label = 'شراء' if prediction[0] == 1 else 'انتظار'
-                        report_data['overall']['buy_signals' if prediction[0] == 1 else 'neutral_signals'] += 1
+                    if hasattr(model, "predict_proba"):
+                        probabilities = model.predict_proba(input_data)
+                        confidence = probabilities[0][1]  # احتمالية الشراء
+
+                    if prediction is not None and confidence is not None:
+                        if prediction[0] == 1 and confidence > confidence_threshold:
+                            prediction_label = 'شراء'
+                            report_data['overall']['buy_signals'] += 1
+                        else:
+                            prediction_label = 'انتظار'
+                            report_data['overall']['neutral_signals'] += 1
                     else:
                         prediction_label = 'غير متاح'
 
                     report_data['models'][symbol] = {
                         'prediction': prediction_label,
+                        'confidence': round(confidence, 2) if confidence is not None else 'N/A',
                         'sentiment_score': round(self.news_sentiment.get(symbol, {}).get('score', 0), 2),
                         'signal_count': signal_count,
                         'last_updated': datetime.now().strftime('%Y-%m-%d %H:%M')
@@ -1698,37 +1785,63 @@ class TradingBot:
             return True  # للإشارة لإعادة المحاولة
         return False
 
-    def safe_api_request(self, request_func, rate_limit=None, max_retries=3):
-        """نسخة محسنة مع تتبع المسار الكامل للأخطاء"""
-        if rate_limit and rate_limit > 0:
-           time.sleep(1.0 / rate_limit)
-        for attempt in range(max_retries):
-            try:
-                response = request_func()
+    def safe_api_request(self, request_func, rate_limit=None, max_retries=3, base_delay=1):
+        """نسخة محسنة مع:
+        - التحكم في معدل الطلبات (rate limiting)
+        - إعادة المحاولة التلقائية مع exponential backoff
+        - معالجة متقدمة لأخطاء API
+        """
+        try:
+            # التحكم في معدل الطلبات
+            if rate_limit and rate_limit > 0:
+                time.sleep(1.0 / rate_limit)
 
-                # تحقق شامل للاستجابة
-                if hasattr(response, 'status_code'):
-                    if response.status_code == 429:
-                        retry_after = int(response.headers.get('Retry-After', 60))
-                        self.logger.warning("Rate limited. Retrying after %s s", retry_after)
-                        time.sleep(retry_after)
-                        continue
+            for attempt in range(max_retries):
+                try:
+                    response = request_func()
 
-                    if response.status_code >= 500:
-                        raise APIError(f"Server error: {response.status_code}")
+                    # معالجة أخطاء HTTP
+                    if hasattr(response, 'status_code'):
+                        if response.status_code == 429:  # Rate limited
+                            retry_after = int(response.headers.get('Retry-After', 60))
+                            self.logger.warning("تم تجاوز معدل الطلبات. إعادة المحاولة بعد %s ثانية", retry_after)
+                            time.sleep(retry_after)
+                            continue
 
-                return response
+                        if response.status_code >= 500:  # Server error
+                            raise APIError(f"خطأ في الخادم: {response.status_code}")
 
-            except (requests.Timeout, requests.ConnectionError) as e:
-                self.logger.error("Network error (attempt %d): %s", attempt + 1, str(e))
-                if attempt == max_retries - 1:
-                    raise APIConnectionError(f"Failed after {max_retries} attempts")
-                time.sleep(2 ** attempt)  # Exponential backoff
+                    return response
 
-            except BinanceAPIException as e:
-                self.handle_binance_error(e)
-                raise
+                except (requests.Timeout, requests.ConnectionError) as e:
+                    self.logger.error("خطأ في الشبكة (المحاولة %d/%d): %s", 
+                                      attempt + 1, max_retries, str(e))
+                    if attempt == max_retries - 1:
+                        raise APIConnectionError(f"فشل بعد {max_retries} محاولات")
+                    time.sleep(base_delay * (2 ** attempt))  # Exponential backoff
 
+                except BinanceAPIException as e:
+                    self.logger.error("خطأ Binance API (المحاولة %d/%d): %s", 
+                                      attempt + 1, max_retries, str(e))
+                    if attempt == max_retries - 1:
+                        self.handle_binance_error(e)  # معالجة خاصة لأخطاء Binance
+                        raise
+                    time.sleep(base_delay * (2 ** attempt))
+
+        except Exception as e:
+            self.logger.critical("فشل غير متوقع في safe_api_request: %s", str(e), exc_info=True)
+            raise APIError(f"فشل في طلب API: {str(e)}")
+
+    def check_api_health(self):
+        try:
+            response = self.client.ping()
+            if not response:
+                raise ConnectionError("No response from API")
+        except Exception as e:
+            self.send_notification('error', f'فشل في اتصال API: {str(e)}')
+            return False
+        return True
+        
     @staticmethod
     def _retry_api_request(request_func, *args, max_retries=3, base_delay=1, logger=None, **kwargs):
         """الجزء الخاص بإعادة المحاولة"""
@@ -1828,46 +1941,72 @@ class TradingBot:
             return None
 
     def execute_trade(self, symbol):
-        """تنفيذ الصفقة مع فحص السعر الحالي والتحكم في معدل الطلبات"""
+        """تنفيذ الصفقة مع التحقق من حد 6$ كحد أدنى للرصيد الحر"""
         try:
-            # 1. جلب بيانات الشموع (الساعة الماضية)
+            # 1. التحقق من الرصيد الحر (حد أدنى 6$ بدلاً من 15%)
+            free_balance = float(self.client.get_asset_balance('USDT')['free'])
+            min_required_balance = 6.0  # حد ثابت = 6 دولار
+
+            if free_balance < min_required_balance:
+                msg = (
+                    f"🛑 رصيد غير كافٍ لـ {symbol}\n"
+                    f"الرصيد الحر: {free_balance:.2f} USDT\n"
+                    f"الحد الأدنى المطلوب: {min_required_balance} USDT"
+                )
+                self.logger.warning(msg)
+                self.send_notification('warning', msg)
+                return None
+
+            # 2. متابعة باقي خطوات الصفقة (جلب البيانات، التحقق من السعر، إلخ...)
             data = self.safe_api_request(
                 lambda: self.client.get_historical_klines(symbol, '1h', '1 day ago UTC'),
+                service_name='binance_klines',
                 rate_limit=1
             )
 
             if not data or len(data) == 0:
-                self.logger.warning("❌ لا توجد بيانات شمعات لـ %s", symbol)
+                self.logger.warning(f"❌ لا توجد بيانات لـ {symbol}")
                 return None
 
-            # 2. استخراج آخر سعر إغلاق (close price)
             latest_close = float(data[-1][4])
-            self.logger.debug("🔍 آخر سعر إغلاق لـ %s: %s", symbol, latest_close)
-
-            # (اختياري) مثال: إلغاء الشراء إذا كان السعر مرتفع جدًا
-            if latest_close > 10:  # غيّر هذا الشرط حسب استراتيجيتك
-                self.logger.info("⛔ السعر مرتفع جدًا لـ %s (%s) — لن يتم تنفيذ الشراء", symbol, latest_close)
+            if latest_close > 10:  # يمكنك تعديل أو إزالة هذا الشرط
+                self.logger.info(f"⛔ إلغاء شراء {symbol} (السعر مرتفع: {latest_close:.2f} USDT)")
                 return None
 
-            # 3. تنفيذ أمر الشراء بمعدل 0.5 طلب/ثانية
-            order = self.safe_api_request(
-                lambda: self.client.create_order(
-                    symbol=symbol,
-                    side='BUY',
-                    type='MARKET',
-                    quantity=self.calculate_quantity(symbol)
-                ),
-                
-                rate_limit=0.5
+            quantity = self.calculate_quantity(symbol)
+            if quantity <= 0:
+                return None
+
+            order = self.client.create_order(
+                symbol=symbol,
+                side='BUY',
+                type='MARKET',
+                quantity=quantity
             )
             return order
 
+        except binance.exceptions.BinanceAPIException as api_error:
+            # معالجة أخطاء Binance API المحددة
+            error_msg = f"خطأ Binance API (كود {api_error.code}): {api_error.message}"
+            self.logger.error(error_msg)
+
+            if api_error.code == -2015:  # Invalid API key
+                self.send_notification('critical', 'API key منتهية الصلاحية!')
+                self.shutdown_bot()
+            elif api_error.code == -1003:  # IP banned
+                self.send_notification('critical', 'تم حظر IP!')
+            elif api_error.code == -1013:  # Invalid quantity
+                self.send_notification('error', 'الكمية غير صالحة للطلب')
+            elif api_error.code == -2010:  # Insufficient balance
+                self.send_notification('error', 'رصيد غير كافي للتنفيذ')
+            else:
+                self.send_notification('error', f"خطأ في Binance API: {api_error.message}")
+
+            return None
+
         except Exception as e:
-            self.logger.error("فشل تنفيذ الصفقة لـ %s: %s", symbol, str(e))
-            self.send_notification('error',
-                f"❌ فشل تنفيذ الصفقة\n"
-                f"🪙 {symbol}\n"
-                f"📛 {str(e)[:200]}...")
+            self.logger.error(f"فشل تنفيذ الصفقة: {str(e)}", exc_info=True)
+            self.send_notification('error', f"❌ فشل في {symbol}: {str(e)[:100]}")
             return None
 
     def get_historical_data(self, symbol: str, interval: str = '5m', limit: int = None, days: int = None) -> pd.DataFrame:
@@ -2758,34 +2897,78 @@ class TradingBot:
 
     def execute_buy_order(self, symbol):
         """
-        تنفيذ أمر شراء مع ضمانات كاملة ضد الأخطاء
+        تنفيذ أمر شراء ذكي بعد التحقق من:
+        - ثقة النموذج
+        - معنويات الأخبار
+        - إشارات خارجية
+        - عدم وجود مركز حالي
         """
         try:
-            # 1. الحصول على الرصيد المتاح
+            # 1. التحقق من عدم وجود مركز حالي
+            if symbol in self.current_positions:
+                self.logger.info(f"🚫 تم إلغاء الشراء لـ {symbol} لأن مركزًا مفتوحًا موجود مسبقًا.")
+                return None
+
+            # 2. التحقق من إشارات خارجية
+            sentiment_score = self.news_sentiment.get(symbol, {}).get("score", 0)
+            pro_signals_count = len(self.pro_signals.get(symbol, []))
+
+            if sentiment_score <= 0.1:
+                self.logger.warning(f"📉 معنويات الأخبار سلبية لـ {symbol}: {sentiment_score}")
+                return None
+
+            if pro_signals_count < 2:
+                self.logger.warning(f"📉 عدد الإشارات الاحترافية قليل لـ {symbol}: {pro_signals_count}")
+                return None
+
+            # 3. الحصول على النموذج والتنبؤ
+            model = self.models.get(symbol)
+            if not model:
+                self.logger.warning(f"⚠️ لا يوجد نموذج متاح لـ {symbol}")
+                return None
+
+            input_data = pd.DataFrame([[
+                0, 0, 50, 0, 1000000,
+                sentiment_score, pro_signals_count
+            ]], columns=[
+                'ema20', 'ema50', 'rsi', 'macd',
+                'volume', 'news_sentiment', 'signal_count'
+            ])
+
+            prediction = model.predict(input_data)
+            confidence = None
+
+            if hasattr(model, "predict_proba"):
+                probabilities = model.predict_proba(input_data)
+                confidence = probabilities[0][1]
+
+            if prediction[0] != 1 or (confidence is not None and confidence < 0.65):
+                self.logger.info(f"❌ لم يتم تفعيل شرط الشراء لـ {symbol} (الثقة: {confidence})")
+                return None
+
+            # 4. التحقق من الرصيد المتاح
             balance = float(self.client.get_asset_balance('USDT')['free'])
-            if balance <= 6:  # حد أدنى 10 USDT
+            if balance <= 6:
                 self.send_notification('warning', f'رصيد غير كافي لـ {symbol}: {balance:.2f} USDT')
                 return None
 
-            # 2. الحصول على سعر السوق
+            # 5. الحصول على السعر وحساب الكمية
             ticker = self.client.get_symbol_ticker(symbol=symbol)
             current_price = float(ticker['price'])
             if current_price <= 0:
                 raise ValueError(f"سعر غير صالح: {current_price}")
 
-            # 3. حساب الكمية
             step_size, min_qty = self.get_trade_limits(symbol)
-            quantity = (balance * 0.3) / current_price  # استثمار 20% من الرصيد
-            quantity = float(np.floor(quantity / step_size) * step_size)  # التقريب للأسفل
+            quantity = (balance * 0.3) / current_price
+            quantity = float(np.floor(quantity / step_size) * step_size)
 
-            # 4. التحقق الحاسم من الكمية
             if quantity <= min_qty:
                 error_msg = f'كمية غير صالحة لـ {symbol}: {quantity:.6f} (الحد الأدنى: {min_qty:.6f})'
                 self.logger.error(error_msg)
                 self.send_notification('error', error_msg)
                 return None
 
-            # 5. تنفيذ الأمر
+            # 6. تنفيذ الشراء
             order = self.client.create_order(
                 symbol=symbol,
                 side=Client.SIDE_BUY,
@@ -2793,14 +2976,13 @@ class TradingBot:
                 quantity=quantity
             )
 
-            # 6. تحديث المراكز المفتوحة
+            # 7. تحديث المركز
             self.current_positions[symbol] = {
                 'entry_price': current_price,
                 'quantity': quantity,
                 'timestamp': datetime.now(),
             }
 
-            # 7. إرسال إشعار الشراء
             self.send_notification(
                 'buy',
                 f"✅ تم الشراء\n"
@@ -2812,16 +2994,10 @@ class TradingBot:
 
             return order
 
-        except binance.exceptions.BinanceAPIException as api_error:
-            error_msg = f"خطأ Binance في الشراء: {api_error.code} - {api_error.message}"
-            self.logger.error(error_msg)
-            self.send_notification('error', f'❌ فشل شراء {symbol[:4]}...')
-            return None
-
         except Exception as e:
-            error_msg = f"فشل غير متوقع في الشراء: {type(e).__name__}: {str(e)}"
+            error_msg = f"❌ فشل في تنفيذ الشراء لـ {symbol}: {str(e)}"
             self.logger.error(error_msg, exc_info=True)
-            self.send_notification('error', f'❌ خطأ عام في {symbol[:4]}...')
+            self.send_notification('error', error_msg)
             return None
 
     def _process_coin(self, symbol):
@@ -3239,57 +3415,92 @@ class TradingBot:
         نسخة محسنة تماماً مع:
         - التحقق من صحة الملف
         - اختبار النموذج قبل التسليم
-        - نظام طوارئ متكامل
+        - نظام طوارئ متكامل متعدد المستويات
+        - الحفاظ على نظام التخزين المؤقت
         """
         try:
             # 1. التحقق من وجود مجلد النماذج
             models_dir = 'models'
             if not os.path.exists(models_dir):
                 os.makedirs(models_dir)
-                raise FileNotFoundError(f"تم إنشاء مجلد النماذج جديدًا لـ {symbol}")
-            
+                self.logger.warning("تم إنشاء مجلد النماذج جديدًا لـ %s", symbol)
+
             model_path = os.path.join(models_dir, f'xgb_model_{symbol}.pkl')
-            
-            # 2. إذا كان النموذج في الذاكرة المؤقتة
+
+            # 2. التحقق من الذاكرة المؤقتة أولاً
             if use_cache and hasattr(self, '_model_cache') and symbol in self._model_cache:
                 cached_model = self._model_cache[symbol]
                 if self._validate_model(cached_model):
                     return cached_model
-            
-            # 3. إذا لم يوجد ملف، ننشئ نموذجًا جديدًا
-            if not os.path.exists(model_path):
-                self.logger.warning("ملف النموذج غير موجود لـ %s، سيتم إنشاء نموذج جديد", symbol)
-                new_model = self.train_ml_model(symbol)  # سيحاول تدريب نموذج جديد
-                if new_model is None:
-                    raise ValueError(f"فشل تدريب نموذج جديد لـ {symbol}")
-                return new_model
-            
-            # 4. تحميل النموذج مع التحقق من صحته
-            with open(model_path, 'rb') as f:
-                model = joblib.load(f)
-            
-            if not self._validate_model(model):
-                raise ValueError(f"النموذج المحمل لـ {symbol} غير صالح")
-            
-            # 5. اختبار أداء النموذج
-            test_result = self._test_model_performance(model)
-            if not test_result['success']:
-                raise ValueError(f"أداء النموذج غير مقبول: {test_result['message']}")
-            
-            # 6. التخزين في الذاكرة المؤقتة إذا طلب
-            if use_cache:
-                if not hasattr(self, '_model_cache'):
-                    self._model_cache = OrderedDict()
-                    self._max_cached_models = 3
-                
-                self._model_cache[symbol] = model
-                self._clean_model_cache()
-            
-            return model
-            
+
+            # 3. محاولة تحميل النموذج الرئيسي
+            if os.path.exists(model_path):
+                try:
+                    with open(model_path, 'rb') as f:
+                        model = joblib.load(f)
+
+                    if self._validate_model(model):
+                        test_result = self._test_model_performance(model)
+                        if test_result['success']:
+                            if use_cache:
+                                self._add_to_cache(symbol, model)
+                            return model
+                        else:
+                            self.logger.warning("أداء النموذج الرئيسي غير مقبول لـ %s: %s",
+                                                 symbol, test_result['message'])
+                except Exception as load_error:
+                    self.logger.error("فشل تحميل النموذج الرئيسي لـ %s: %s",
+                                      symbol, str(load_error), exc_info=True)
+
+            # 4. محاولة إنشاء نموذج طوارئ (المستوى الأول)
+            try:
+                emergency_model = self._create_emergency_model()
+                if self._validate_model(emergency_model):
+                    test_result = self._test_model_performance(emergency_model)
+                    if test_result['success']:
+                        self.logger.warning("تم استخدام نموذج طوارئ (المستوى 1) لـ %s", symbol)
+                        self.send_notification('warning',
+                                               f"⚠️ استخدام نموذج طوارئ (L1) لـ {symbol}")
+                        if use_cache:
+                            self._add_to_cache(symbol, emergency_model)
+                        return emergency_model
+            except Exception as emergency_error:
+                self.logger.error("فشل إنشاء نموذج طوارئ (L1) لـ %s: %s",
+                                  symbol, str(emergency_error), exc_info=True)
+
+            # 5. استخدام نموذج بديل بسيط (المستوى الثاني)
+            try:
+                fallback_model = self.initialize_fallback_model()
+                if self._validate_model(fallback_model):
+                    self.logger.critical("تم استخدام نموذج بديل بسيط (المستوى 2) لـ %s", symbol)
+                    self.send_notification('error',
+                                           f"🚨 استخدام نموذج بديل بسيط (L2) لـ {symbol}")
+                    if use_cache:
+                        self._add_to_cache(symbol, fallback_model)
+                    return fallback_model
+            except Exception as fallback_error:
+                self.logger.critical("فشل إنشاء نموذج بديل لـ %s: %s",
+                                     symbol, str(fallback_error), exc_info=True)
+
+            # 6. إذا فشل كل شيء
+            raise RuntimeError(f"فشل حرج: لا يوجد نموذج صالح لـ {symbol}")
+
         except Exception as e:
-            self.logger.error("فشل تحميل/تهيئة النموذج لـ %s: %s", symbol, str(e), exc_info=True)
-            raise  # نعيد رفع الاستثناء للتعامل معه في المستوى الأعلى
+            self.logger.critical("فشل تحميل/تهيئة النموذج لـ %s: %s",
+                                 symbol, str(e), exc_info=True)
+            self.send_notification('error',
+                                   f"💥 فشل حرج في تحميل النموذج لـ {symbol}\n"
+                                   f"📛 {type(e).__name__}: {str(e)[:200]}")
+            raise RuntimeError(f"لا يمكن المتابعة بدون نموذج لـ {symbol}") from e
+
+    def _add_to_cache(self, symbol, model):
+        """إضافة النموذج للذاكرة المؤقتة مع التحكم في الحجم"""
+        if not hasattr(self, '_model_cache'):
+            self._model_cache = OrderedDict()
+            self._max_cached_models = 3
+
+        self._model_cache[symbol] = model
+        self._clean_model_cache()
 
     def _validate_model(self, model):
         """نسخة محسنة تجمع بين الميزات"""
