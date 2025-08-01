@@ -1298,7 +1298,7 @@ class TradingBot:
 
             # 3. التحقق من جودة المصدر الحالي قبل التدوير
             if not self._validate_news_source(current_source):
-                self.logger.warning(f"المصدر الحالي غير صالح: {current_source}")
+                self.logger.warning("المصدر الحالي غير صالح: %s", current_source)
                 self.send_notification('warning', 
                     f"⚠️ مشكلة في مصدر الأخبار الحالي: {current_source}")
                 
@@ -1308,7 +1308,6 @@ class TradingBot:
                 return
 
             # 4. تدوير المصادر مع التحقق من الجودة
-            original_index = self.rotation_index
             next_index = (self.rotation_index + 1) % len(self.news_sources)
             validated = False
             attempts = 0
@@ -1320,7 +1319,7 @@ class TradingBot:
                     validated = True
                     break
                     
-                self.logger.warning(f"تم تخطي مصدر غير صالح: {next_source}")
+                self.logger.warning("تم تخطي مصدر غير صالح: %s", next_source)
                 next_index = (next_index + 1) % len(self.news_sources)
                 attempts += 1
 
@@ -1334,14 +1333,14 @@ class TradingBot:
             self.save_rotation_index()
 
             # 7. تسجيل النتيجة
-            self.logger.info(f"تم التدوير من {current_source} إلى {next_source}")
+            self.logger.info("تم التدوير من %s إلى %s", current_source, next_source)
             self.send_notification('update', 
                 f"🔄 تم تدوير مصادر الأخبار\n"
                 f"المصدر الجديد: {next_source}\n"
                 f"المحاولات: {attempts+1}")
 
         except Exception as e:
-            self.logger.error(f"فشل في تدوير المصادر: {str(e)}", exc_info=True)
+            self.logger.error("فشل في تدوير المصادر: %s", str(e), exc_info=True)
             self.send_notification('error', 
                 f"❌ فشل تدوير مصادر الأخبار: {str(e)[:200]}")
 
@@ -1364,13 +1363,14 @@ class TradingBot:
             elif source == 'newsapi':
                 try:
                     test_response = requests.get(
-                        "https://newsapi.org/v2/top-headlines?" + 
+                        "https://newsapi.org/v2/top-headlines?" +
                         f"sources=crypto-coins-news&apiKey={os.getenv('NEWSAPI_KEY')}",
                         timeout=10
                     )
                     if test_response.status_code != 200:
                         return False
-                except:
+                except requests.RequestException as e:
+                    self.logger.warning(f"NewsAPI request failed: {str(e)}")
                     return False
 
             # 3. التحقق من البيانات الأساسية
@@ -1381,10 +1381,11 @@ class TradingBot:
             return True
 
         except Exception as e:
-            self.logger.warning(f"فشل التحقق من مصدر {source}: {str(e)}")
+            self.logger.warning("فشل التحقق من مصدر %s: %s", source, str(e))
             return False
-
-    def _is_data_valid(self, data):
+            
+    @staticmethod
+    def _is_data_valid(data):
         """تحقق إضافي من صحة البيانات"""
         required_fields = {
             'telegram': ['text', 'timestamp'],
@@ -1493,15 +1494,13 @@ class TradingBot:
             
             # 5. التحقق من الحد الأدنى للكمية
             if rounded_qty < min_qty:
-                self.logger.warning(
-                    f"الكمية المحسوبة ({rounded_qty}) أقل من الحد الأدنى ({min_qty}) لـ {symbol}"
-                )
+                self.logger.warning("الكمية المحسوبة (%s) أقل من الحد الأدنى (%s) لـ %s", rounded_qty, min_qty, symbol)
                 return min_qty  # التنفيذ بأقل كمية مسموح بها
             
             return rounded_qty
             
         except Exception as e:
-            self.logger.error(f"فشل حساب الكمية لـ {symbol}: {str(e)}", exc_info=True)
+            self.logger.error("فشل حساب الكمية لـ %s: %s", symbol, str(e), exc_info=True)
             self.send_notification('error', f"فشل حساب الكمية لـ {symbol}: {str(e)[:100]}")
             return 0
 
@@ -1960,17 +1959,16 @@ class TradingBot:
             # 2. متابعة باقي خطوات الصفقة (جلب البيانات، التحقق من السعر، إلخ...)
             data = self.safe_api_request(
                 lambda: self.client.get_historical_klines(symbol, '1h', '1 day ago UTC'),
-                service_name='binance_klines',
                 rate_limit=1
             )
 
             if not data or len(data) == 0:
-                self.logger.warning(f"❌ لا توجد بيانات لـ {symbol}")
+                self.logger.warning("❌ لا توجد بيانات لـ %s", symbol)
                 return None
 
             latest_close = float(data[-1][4])
             if latest_close > 10:  # يمكنك تعديل أو إزالة هذا الشرط
-                self.logger.info(f"⛔ إلغاء شراء {symbol} (السعر مرتفع: {latest_close:.2f} USDT)")
+                self.logger.info("⛔ إلغاء شراء %s (السعر مرتفع: %.2f USDT)", symbol, latest_close)
                 return None
 
             quantity = self.calculate_quantity(symbol)
@@ -2005,7 +2003,7 @@ class TradingBot:
             return None
 
         except Exception as e:
-            self.logger.error(f"فشل تنفيذ الصفقة: {str(e)}", exc_info=True)
+            self.logger.error("فشل تنفيذ الصفقة: %s", str(e), exc_info=True)
             self.send_notification('error', f"❌ فشل في {symbol}: {str(e)[:100]}")
             return None
 
@@ -2906,7 +2904,7 @@ class TradingBot:
         try:
             # 1. التحقق من عدم وجود مركز حالي
             if symbol in self.current_positions:
-                self.logger.info(f"🚫 تم إلغاء الشراء لـ {symbol} لأن مركزًا مفتوحًا موجود مسبقًا.")
+                self.logger.info("🚫 تم إلغاء الشراء لـ %s لأن مركزًا مفتوحًا موجود مسبقًا.", symbol)
                 return None
 
             # 2. التحقق من إشارات خارجية
@@ -2914,17 +2912,17 @@ class TradingBot:
             pro_signals_count = len(self.pro_signals.get(symbol, []))
 
             if sentiment_score <= 0.1:
-                self.logger.warning(f"📉 معنويات الأخبار سلبية لـ {symbol}: {sentiment_score}")
+                self.logger.warning("📉 معنويات الأخبار سلبية لـ %s: %s", symbol, sentiment_score)
                 return None
 
             if pro_signals_count < 2:
-                self.logger.warning(f"📉 عدد الإشارات الاحترافية قليل لـ {symbol}: {pro_signals_count}")
+                self.logger.warning("📉 عدد الإشارات الاحترافية قليل لـ %s: %s", symbol, pro_signals_count)
                 return None
 
             # 3. الحصول على النموذج والتنبؤ
             model = self.models.get(symbol)
             if not model:
-                self.logger.warning(f"⚠️ لا يوجد نموذج متاح لـ {symbol}")
+                self.logger.warning("⚠️ لا يوجد نموذج متاح لـ %s", symbol)
                 return None
 
             input_data = pd.DataFrame([[
@@ -2943,7 +2941,7 @@ class TradingBot:
                 confidence = probabilities[0][1]
 
             if prediction[0] != 1 or (confidence is not None and confidence < 0.65):
-                self.logger.info(f"❌ لم يتم تفعيل شرط الشراء لـ {symbol} (الثقة: {confidence})")
+                self.logger.info("❌ لم يتم تفعيل شرط الشراء لـ %s (الثقة: %s)", symbol, confidence)
                 return None
 
             # 4. التحقق من الرصيد المتاح
