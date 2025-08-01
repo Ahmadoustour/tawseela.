@@ -3,7 +3,7 @@ version: "2.0"
 
 services:
   bot:
-    image: your-dockerhub-name/your-image-name
+    image: docker.io/Ahmadoustour/mybot:latest
     expose:
       - port: 80
         as: 80
@@ -35,3 +35,4 @@ deployment:
     dcloud:
       profile: bot
       count: 1
+
