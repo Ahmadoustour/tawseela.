@@ -1,0 +1,7 @@
+{
+  "name": "fake-python-project",
+  "version": "1.0.0",
+  "scripts": {
+    "start": "python bot.py"
+  }
+}
