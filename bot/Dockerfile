@@ -1,4 +1,3 @@
-GNU nano 6.2          Dockerfile
 FROM python:3.10
 
 WORKDIR /app
