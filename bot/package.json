@@ -1,7 +1,7 @@
 {
-  "name": "fake-python-project",
+  "name": "fake-node-wrapper",
   "version": "1.0.0",
   "scripts": {
-    "start": "python bot.py"
+    "start": "sh start.sh"
   }
 }
