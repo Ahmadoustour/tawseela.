@@ -1,0 +1,28 @@
+version: "2.0"
+
+services:
+  bottrading:
+    image: ahmadoustour/bottrading:latest
+    command: ["python", "bot.py"]
+
+profiles:
+  compute:
+    bottrading:
+      resources:
+        cpu:
+          units: 4
+        memory:
+          size: 8Gi
+        storage:
+          size: 100Gi
+
+  placement:
+    bottrading:
+      cluster:
+        match:
+          region: akash
+
+deployment:
+  bottrading:
+    profile: bottrading
+    count: 1
