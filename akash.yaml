@@ -2,7 +2,7 @@ version: "2.0"
 
 services:
   bottrading:
-    image: ahmadoustour/bottrading:latest
+    image: ahmadoustoura/bottrading:latest
     command: ["python", "bot.py"]
 
 profiles:
