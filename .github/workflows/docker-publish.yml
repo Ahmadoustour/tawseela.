@@ -23,4 +23,4 @@ jobs:
         with:
           context: .
           push: true
-          tags: Ahmadoustour/bottrading:latest
+          tags: ahmadoustour/bottrading:latest
