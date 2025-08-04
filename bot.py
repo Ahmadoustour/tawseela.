@@ -241,7 +241,7 @@ class TradingBot:
                 handler.close()
                 self.logger.removeHandler(handler)
 
-        """إعداد نظام تسجيل الأخطاء الآمن مع تجنب التعارض في الملفات"""
+# إعداد نظام تسجيل الأخطاء الآمن مع تجنب التعارض في الملفات
         try:
             # 1. إنشاء مجلد اللوجات إذا لم يكن موجوداً
             logs_dir = 'logs'
@@ -535,8 +535,9 @@ class TradingBot:
                 continue
 
         return signals
-
-    def _fetch_twitter_data(self, url):
+        
+    @staticmethod
+    def _fetch_twitter_data(url):
         session = requests.Session()
         try:
             response = session.get(url, timeout=10)
