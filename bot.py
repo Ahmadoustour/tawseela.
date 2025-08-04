@@ -4177,7 +4177,7 @@ class TradingBot:
                 self.tg_bot.send_message(
                     chat_id=chat_id,
                     text=message,
-                    parse_mode=ParseMode.MARKDOWN,
+                    parse_mode=constants.ParseMode.MARKDOWN,
                     disable_web_page_preview=True
                 )
                 return True
@@ -4265,7 +4265,7 @@ class TradingBot:
         self.tg_bot.send_message(
             chat_id=chat_id,
             text=message,
-            parse_mode=ParseMode.MARKDOWN
+            parse_mode=constants.ParseMode.MARKDOWN
         )
 
     def _safe_send_message(self, chat_id, message, retries=3):
@@ -4275,7 +4275,7 @@ class TradingBot:
                 self.tg_bot.send_message(
                     chat_id=chat_id,
                     text=message,
-                    parse_mode=ParseMode.MARKDOWN,
+                    parse_mode=constants.ParseMode.MARKDOWN 
                   
                 )
                 return
