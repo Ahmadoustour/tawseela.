@@ -23,7 +23,7 @@ from datetime import datetime, timedelta, time, timezone
 from binance.client import Client
 from binance.exceptions import BinanceAPIException
 from telegram import Bot
-from telegram.constants import ParseMode
+from telegram import constants
 from telethon.sync import TelegramClient
 from dotenv import load_dotenv
 from ta.trend import EMAIndicator, ADXIndicator, MACD
