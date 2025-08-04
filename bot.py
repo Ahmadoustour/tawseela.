@@ -18,6 +18,7 @@ import platform
 import psutil
 import holidays
 import sklearn
+import signal
 from logging.handlers import RotatingFileHandler
 from datetime import datetime, timedelta, time, timezone
 from binance.client import Client
@@ -115,6 +116,8 @@ class TradingBot:
         self.last_peaks = dict.fromkeys(self.symbols, None)
         self.fib_levels = dict.fromkeys(self.symbols, None)
         self.pivot_points = dict.fromkeys(self.symbols, None)
+        signal.signal(signal.SIGINT, self._handle_signal)
+        signal.signal(signal.SIGTERM, self._handle_signal)
 
         # إعدادات التداول
         self.min_profit = 0.4
@@ -232,6 +235,12 @@ class TradingBot:
             raise RuntimeError("لا يمكن إنشاء نموذج بديل") from e
 
     def _init_logging(self):
+        # تنظيف أي handlers موجودة مسبقاً
+        if hasattr(self, 'logger') and self.logger.handlers:
+            for handler in self.logger.handlers[:]:
+                handler.close()
+                self.logger.removeHandler(handler)
+
         """إعداد نظام تسجيل الأخطاء الآمن مع تجنب التعارض في الملفات"""
         try:
             # 1. إنشاء مجلد اللوجات إذا لم يكن موجوداً
@@ -282,7 +291,7 @@ class TradingBot:
             self.logger.info("✅ تم تهيئة نظام التسجيل بنجاح")
 
         except Exception as e:
-          #نظام الطوارئ عند فشل تهيئة نظام التسجيل
+            # نظام الطوارئ عند فشل تهيئة نظام التسجيل
             try:
                 # أ. تهيئة أساسيات logging
                 logging.basicConfig(
@@ -290,7 +299,7 @@ class TradingBot:
                     format='%(asctime)s - EMERGENCY - %(message)s',
                     handlers=[
                         logging.StreamHandler(),  # إخراج إلى الكونسول
-                        logging.FileHandler('emergency.log')  # ملف طوارئ منفصل
+                        logging.FileHandler('emergency.log', encoding='utf-8')  # ملف طوارئ منفصل
                     ]
                 )
 
@@ -526,6 +535,14 @@ class TradingBot:
                 continue
 
         return signals
+
+    def _fetch_twitter_data(self, url):
+        session = requests.Session()
+        try:
+            response = session.get(url, timeout=10)
+            return response.json()
+        finally:
+            session.close()  # إغلاق الاتصال بشكل صريح
 
     @staticmethod
     def _advanced_sentiment_analysis(text):
@@ -1607,6 +1624,46 @@ class TradingBot:
                 'status': 'فشل حرج'
             }
 
+    def cleanup_resources(self):
+        """إغلاق جميع الموارد المفتوحة"""
+        try:
+            # 1. إغلاق handlers السجلات
+            if hasattr(self, 'logger') and self.logger.handlers:
+                for handler in self.logger.handlers[:]:
+                    try:
+                        handler.close()
+                        self.logger.removeHandler(handler)
+                    except Exception as e:
+                        print(f"Failed to close logger handler: {str(e)}")
+
+            # 2. إغلاق اتصالات APIs
+            if hasattr(self, 'client'):
+                try:
+                    del self.client  # Binance Client
+                except Exception as e:
+                    print(f"Failed to close Binance client: {str(e)}")
+
+            # 3. إغلاق اتصالات التليجرام
+            if hasattr(self, 'tg_bot'):
+                try:
+                    del self.tg_bot
+                except Exception as e:
+                    print(f"Failed to close Telegram bot: {str(e)}")
+
+            # 4. تنظيف الذاكرة المؤقتة
+            if hasattr(self, '_model_cache'):
+                self._model_cache.clear()
+
+            # 5. إغلاق ملفات التدريب المفتوحة
+            if hasattr(self, 'memory'):
+                try:
+                    self.memory.clear()
+                except Exception as e:
+                    print(f"Failed to clear memory cache: {str(e)}")
+
+        except Exception as e:
+            print(f"Critical error during cleanup: {str(e)}")
+
     def save_state(self):
         state = {
             'current_positions': self.current_positions,
@@ -1670,7 +1727,7 @@ class TradingBot:
                 return
 
             # 2. قراءة الملف مع التحقق من صحته
-            with open(state_file, 'r') as f:
+            with open(state_file, 'r', encoding='utf-8') as f:
                 try:
                     state = json.load(f)
                 except json.JSONDecodeError as e:
@@ -1721,7 +1778,7 @@ class TradingBot:
             self.send_notification('update', '📥 تم تحميل الحالة من state.json بعد التحقق')
 
         except Exception as e:
-            self._handle_state_loading_error(e, state_file)
+            self._handle_state_loading_error(e, 'state.json')
 
     def _initialize_default_state(self):
         """تهيئة الحالة الافتراضية"""
@@ -1789,6 +1846,10 @@ class TradingBot:
             time.sleep(60)
             return True  # للإشارة لإعادة المحاولة
         return False
+
+    def _handle_signal(self, signum, frame):
+        self.shutdown_bot(f"إشارة نظام {signum}")
+        sys.exit(0)
 
     def safe_api_request(self, request_func, rate_limit=None, max_retries=3, base_delay=1):
         """نسخة محسنة مع:
@@ -2239,8 +2300,8 @@ class TradingBot:
         print("تم تشغيل البوت")
 
     def shutdown_bot(self, reason="إيقاف طبيعي"):
-        """يوقف البوت مع إشعار"""
         self.is_running = False
+        self.cleanup_resources()  # تنظيف الموارد قبل الإيقاف
         self.send_notification('shutdown', {'reason': reason})
         print(f"تم إيقاف البوت. السبب: {reason}")
 
@@ -3413,6 +3474,15 @@ class TradingBot:
         except Exception as e:
             self.logger.critical("فشل غير متوقع في تقييم شروط الدخول لـ %s: %s", symbol, str(e), exc_info=True)
             return False
+
+    def clear_caches(self):
+        """تنظيف جميع الذواكر المؤقتة"""
+        if hasattr(self, '_model_cache'):
+            self._model_cache.clear()
+        if hasattr(self, '_news_cache'):
+            self._news_cache.clear()
+        if hasattr(self, 'memory'):
+            self.memory.clear()
 
     def load_or_initialize_model(self, symbol, use_cache=True):
         """
