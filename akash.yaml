@@ -1,8 +1,8 @@
-version: "4.0"
+version: "3.0"
 
 services:
   bottrading:
-    image: ahmadoustoura/bottrading:v4
+    image: ahmadoustoura/bottrading:v3
     command: ["python", "bot.py"]
 
 profiles:
