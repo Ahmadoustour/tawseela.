@@ -3,7 +3,7 @@ name: Build and Push Docker Image
 on:
   push:
     branches:
-      - main  # أو غيّرها حسب فرعك الفعلي
+      - main
 
 jobs:
   build:
@@ -11,18 +11,21 @@ jobs:
 
     steps:
       - name: Checkout code
-        uses: actions/checkout@v3
+        uses: actions/checkout@v1
 
       - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v3
+        uses: docker/setup-buildx-action@v1
 
       - name: Log in to Docker Hub
-        uses: docker/login-action@v3
+        uses: docker/login-action@v1
         with:
           username: ${{ secrets.DOCKER_USERNAME }}
           password: ${{ secrets.DOCKER_PASSWORD }}
 
       - name: Build and push Docker image
         run: |
-          docker build -t ahmadoustoura/bottrading:v3 .
-          docker push ahmadoustoura/bottrading:v3
+          docker build -t ahmadoustoura/bottrading:v1 \
+            --ulimit nofile=65536:65536 \
+            --build-arg INOTIFY_WATCHES=524288 \
+            .
+          docker push ahmadoustoura/bottrading:v1

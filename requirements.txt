@@ -16,3 +16,4 @@ scikit-learn
 scipy
 psutil
 holidays
+psutil

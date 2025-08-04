@@ -19,6 +19,8 @@ import psutil
 import holidays
 import sklearn
 import signal
+import resource
+import psutil
 from logging.handlers import RotatingFileHandler
 from datetime import datetime, timedelta, time, timezone
 from binance.client import Client
@@ -98,6 +100,7 @@ class TradingBot:
         self.ROTATION_INDEX_FILE = 'rotation_index.json'
         self.TWEET_FIELDS_KEY = 'tweet.fields'
         self.OBJECTIVE_BINARY = 'binary:logistic'
+        self.adjust_system_limits()
 
         # تهيئة القواميس الخاصة بالتحليل والإشارات
         self.news_sentiment = {
@@ -201,6 +204,45 @@ class TradingBot:
                     )
                     self.shutdown_bot(reason=f"فشل حرج في تحميل النماذج: {str(emergency_error)}")
                     raise RuntimeError(f"لا يمكن المتابعة بدون نموذج لـ {symbol}") from emergency_error
+
+    @staticmethod
+    def adjust_system_limits(logger):
+        """ضبط حدود النظام عند بدء التشغيل"""
+        try:
+            soft, hard = resource.getrlimit(resource.RLIMIT_NOFILE)
+            new_soft = min(65536, hard)
+            resource.setrlimit(resource.RLIMIT_NOFILE, (new_soft, hard))
+            
+            logger.info(f"حدود الملفات المفتوحة: Soft={new_soft}, Hard={hard}")
+        except Exception as e:
+            logger.error(f"فشل في ضبط حدود النظام: {str(e)}")
+
+
+if __name__ == "__main__":
+    # إنشاء logger مؤقت إذا لم يكن موجوداً
+    logging.basicConfig(level=logging.INFO)
+    logger = logging.getLogger(__name__)
+    
+    try:
+        # ضبط الحدود أولاً
+        SystemConfigurator.adjust_system_limits(logger)
+        
+        # ثم تشغيل البوت
+        bot = TradingBot()
+        bot.start_bot()
+        
+        # تشغيل الجدولة
+        bot.start_scheduler()
+        
+        # الحفاظ على البرنامج يعمل
+        while bot.is_running:
+            time.sleep(1)
+            
+    except Exception as e:
+        logger.critical(f"فشل تشغيل البوت: {str(e)}", exc_info=True)
+        if 'bot' in locals():
+            bot.shutdown_bot(reason=f"خطأ تشغيل: {str(e)}")
+        sys.exit(1)
 
     def initialize_fallback_model(self):
         """إنشاء نموذج بديل أساسي في حال فشل التحميل"""
@@ -3972,7 +4014,8 @@ class TradingBot:
                     raise ValueError(f"بيانات تدريب غير كافية ({len(df)} صف فقط)")
 
             except Exception as load_error:
-                self.logger.error("تحميل بيانات التدريب | %s: %s", type(load_error).__name__, str(load_error), exc_info=True); raise
+                self.logger.error("تحميل بيانات التدريب | %s: %s", type(load_error).__name__, str(load_error), exc_info=True)
+                raise
 
             # 3. تقسيم البيانات
             try:
@@ -3986,7 +4029,8 @@ class TradingBot:
                     stratify=y
                 )
             except Exception as split_error:
-                self.logger.error("تقسيم البيانات | %s: %s", type(split_error).__name__, str(split_error), exc_info=True); raise
+                self.logger.error("تقسيم البيانات | %s: %s", type(split_error).__name__, str(split_error), exc_info=True)
+                raise
 
             # 4. إنشاء وتدريب النموذج
             try:
@@ -4000,11 +4044,12 @@ class TradingBot:
                         random_state=42,
                         eval_metric='logloss'
                     ))
-                ], memory=self.memory)  # ← ✅ هذا هو المطلوب
+                ], memory=self.memory)
                 
                 model.fit(X_train, y_train)
             except Exception as train_error:
-                self.logger.error("تدريب النموذج | %s: %s", type(train_error).__name__, str(train_error), exc_info=True); raise
+                self.logger.error("تدريب النموذج | %s: %s", type(train_error).__name__, str(train_error), exc_info=True)
+                raise
 
             # 5. تقييم النموذج
             try:
@@ -4026,21 +4071,24 @@ class TradingBot:
                     symbol, metrics['accuracy'], metrics['precision'], metrics['recall']
                 )
             except Exception as eval_error:
-                self.logger.error("تقييم النموذج | %s: %s", type(eval_error).__name__, str(eval_error), exc_info=True); raise
+                self.logger.error("تقييم النموذج | %s: %s", type(eval_error).__name__, str(eval_error), exc_info=True)
+                raise
 
             # 6. حفظ النموذج
             try:
                 model_path = f"xgb_model_{symbol}.pkl"
-                joblib.dump(model, model_path)
-                
+                with open(model_path, 'wb') as f:  # استخدام with لضمان الإغلاق
+                    joblib.dump(model, f)
+                    
                 # التحقق من حفظ الملف
                 if not os.path.exists(model_path):
                     raise RuntimeError("فشل حفظ النموذج على القرص")
-                    
+                        
                 self.logger.info("تم حفظ النموذج في %s", model_path)
-                
+
             except Exception as save_error:
-                self.logger.error("حفظ النموذج | %s: %s", type(save_error).__name__, str(save_error), exc_info=True); raise
+                self.logger.error("حفظ النموذج | %s: %s", type(save_error).__name__, str(save_error), exc_info=True)
+                raise
 
             # 7. إرسال تقرير النجاح
             self.send_notification(
@@ -4147,7 +4195,7 @@ class TradingBot:
                 raise ValueError("أعمدة البيانات المطلوبة مفقودة")
                 
             new_data = {
-                'timestamp': datetime.now(timezone.utc).isoformat()  # ✅ timezone-aware
+                'timestamp': datetime.now(timezone.utc).isoformat(),
                 **{col: last_row[col] for col in required_columns},
                 'news_sentiment': self.news_sentiment.get(symbol, {}).get('score', 0),
                 'signal_count': len(self.pro_signals.get(symbol, [])),
@@ -4155,13 +4203,15 @@ class TradingBot:
             }
             
             file_path = f'training_data_{symbol}.csv'
-            pd.DataFrame([new_data]).to_csv(
-                file_path, 
-                mode='a', 
-                header=not os.path.exists(file_path), 
-                index=False
-            )
+            file_exists = os.path.exists(file_path)
             
+            with open(file_path, 'a' if file_exists else 'w', encoding='utf-8') as f:
+                pd.DataFrame([new_data]).to_csv(
+                    f, 
+                    header=not file_exists, 
+                    index=False
+                )
+                
         except Exception as e:
             self.send_notification('error', f'فشل في إضافة بيانات التدريب: {str(e)}')
             raise
