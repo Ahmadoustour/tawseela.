@@ -3,7 +3,7 @@ numpy
 schedule
 requests
 tweepy
-python-telegram-bot==20.3
+python-telegram-bot
 python-binance
 telethon
 python-dotenv
