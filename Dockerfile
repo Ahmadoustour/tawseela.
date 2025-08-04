@@ -1,4 +1,4 @@
-FROM python:3.1-slim
+FROM python:3.10-slim
 
 # زيادة حدود الملفات
 RUN echo "fs.inotify.max_user_watches=524288" >> /etc/sysctl.conf \
