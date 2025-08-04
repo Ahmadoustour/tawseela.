@@ -4,6 +4,7 @@ schedule
 requests
 tweepy
 python-telegram-bot
+packaging
 python-binance
 telethon
 python-dotenv

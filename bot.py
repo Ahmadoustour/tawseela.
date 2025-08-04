@@ -41,6 +41,13 @@ from telegram.error import NetworkError
 from sklearn.model_selection import train_test_split, GridSearchCV, TimeSeriesSplit
 from collections import OrderedDict
 from joblib import Memory
+import telegram
+from packaging import version
+
+if version.parse(telegram.__version__) >= version.parse("20.0"):
+    from telegram.constants import ParseMode
+else:
+    from telegram import ParseMode
 # تحميل المتغيرات البيئية
 load_dotenv()
 
@@ -4177,7 +4184,7 @@ class TradingBot:
                 self.tg_bot.send_message(
                     chat_id=chat_id,
                     text=message,
-                    parse_mode=constants.ParseMode.MARKDOWN,
+                    parse_mode=ParseMode.MARKDOWN,
                     disable_web_page_preview=True
                 )
                 return True
@@ -4265,7 +4272,7 @@ class TradingBot:
         self.tg_bot.send_message(
             chat_id=chat_id,
             text=message,
-            parse_mode=constants.ParseMode.MARKDOWN
+            parse_mode=ParseMode.MARKDOWN
         )
 
     def _safe_send_message(self, chat_id, message, retries=3):
@@ -4275,7 +4282,7 @@ class TradingBot:
                 self.tg_bot.send_message(
                     chat_id=chat_id,
                     text=message,
-                    parse_mode=constants.ParseMode.MARKDOWN 
+                    parse_mode=ParseMode.MARKDOWN
                   
                 )
                 return
