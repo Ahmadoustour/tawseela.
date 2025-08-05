@@ -29,4 +29,3 @@ jobs:
             --build-arg INOTIFY_WATCHES=524288 \
             .
           docker push ahmadoustoura/bottrading:v1
-#
