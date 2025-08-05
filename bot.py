@@ -20,7 +20,6 @@ import holidays
 import sklearn
 import signal
 import resource
-import psutil
 from logging.handlers import RotatingFileHandler
 from datetime import datetime, timedelta, time, timezone
 from binance.client import Client
@@ -101,6 +100,7 @@ class TradingBot:
         self.TWEET_FIELDS_KEY = 'tweet.fields'
         self.OBJECTIVE_BINARY = 'binary:logistic'
         self.adjust_system_limits()
+        self.STATE_FILE = 'state.json'
 
         # تهيئة القواميس الخاصة بالتحليل والإشارات
         self.news_sentiment = {
@@ -209,7 +209,7 @@ class TradingBot:
     def adjust_system_limits(logger):
         """ضبط حدود النظام عند بدء التشغيل"""
         try:
-            soft, hard = resource.getrlimit(resource.RLIMIT_NOFILE)
+            _, hard = resource.getrlimit(resource.RLIMIT_NOFILE)
             new_soft = min(65536, hard)
             resource.setrlimit(resource.RLIMIT_NOFILE, (new_soft, hard))
             
@@ -225,7 +225,7 @@ if __name__ == "__main__":
     
     try:
         # ضبط الحدود أولاً
-        SystemConfigurator.adjust_system_limits(logger)
+        TradingBot.adjust_system_limits(logger)
         
         # ثم تشغيل البوت
         bot = TradingBot()
@@ -821,7 +821,7 @@ if __name__ == "__main__":
         return signals
 
     @staticmethod
-    def _fetch_other_sources(symbol):
+    def _fetch_other_sources(_symbol):
         """جلب إشارات من مصادر أخرى (مثل منتديات، مواقع متخصصة)"""
         signals = []
 
@@ -1714,7 +1714,7 @@ if __name__ == "__main__":
             'trailing_stops': self.trailing_stops
         }
         try:
-            with open('state.json', 'w') as f:
+            with open(self.STATE_FILE, 'w') as f:
                 json.dump(state, f)
             print("✅ تم حفظ الحالة بنجاح.")
             self.send_notification('update', '💾 تم حفظ الحالة في الملف state.json')
@@ -1761,7 +1761,7 @@ if __name__ == "__main__":
     def load_state(self):
         """تحميل الحالة مع التحقق من صحة البيانات وفحص التكامل"""
         try:
-            state_file = 'state.json'
+            state_file = self.STATE_FILE
             
             # 1. التحقق من وجود الملف
             if not os.path.exists(state_file):
@@ -1821,7 +1821,7 @@ if __name__ == "__main__":
             self.send_notification('update', '📥 تم تحميل الحالة من state.json بعد التحقق')
 
         except Exception as e:
-            self._handle_state_loading_error(e, 'state.json')
+            self._handle_state_loading_error(e, self.STATE_FILE)
 
     def _initialize_default_state(self):
         """تهيئة الحالة الافتراضية"""
@@ -1882,15 +1882,15 @@ if __name__ == "__main__":
             f"⏰ {datetime.now().strftime('%H:%M')}"
         )
 
-    def handle_binance_error(self, e):
+    def handle_binance_error(self, error):
         """معالجة أخطاء Binance المحددة"""
-        if isinstance(e, binance.exceptions.BinanceAPIException) and e.code == -1003:
+        if isinstance(error, binance.exceptions.BinanceAPIException) and error.code == -1003:
             self.send_notification('warning', "تم تجاوز معدل الطلبات لـ Binance - الانتظار 60 ثانية")
             time.sleep(60)
             return True  # للإشارة لإعادة المحاولة
         return False
 
-    def _handle_signal(self, signum, frame):
+    def _handle_signal(self, signum, _):
         self.shutdown_bot(f"إشارة نظام {signum}")
         sys.exit(0)
 
@@ -1952,7 +1952,7 @@ if __name__ == "__main__":
         return True
         
     @staticmethod
-    def _retry_api_request(request_func, *args, max_retries=3, base_delay=1, logger=None, **kwargs):
+    def _retry_api_request(request_func, *args, max_retries=3, base_delay=1, **kwargs):
         """الجزء الخاص بإعادة المحاولة"""
         for attempt in range(max_retries):
             try:
@@ -4323,7 +4323,7 @@ if __name__ == "__main__":
                 continue
 
             except Exception as e:
-                error_msg = f"فشل إرسال غير متوقع (المحاولة {attempt + 1}): {str(e)}"
+                error_msg = f"فشل إرسال غ�ر متوقع (المحاولة {attempt + 1}): {str(e)}"
                 self._log_error(error_msg)
                 if attempt == max_retries - 1:
                     self._emergency_log_notification('send_failure', error_msg)
