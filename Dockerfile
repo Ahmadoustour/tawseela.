@@ -1,15 +1,14 @@
 FROM python:3.10-slim
 
-# زيادة حدود الملفات
-RUN echo "fs.inotify.max_user_watches=524288" >> /etc/sysctl.conf \
-    && echo "* soft nofile 65536" >> /etc/security/limits.conf \
-    && echo "* hard nofile 65536" >> /etc/security/limits.conf
-
+# إعداد بيئة العمل
 WORKDIR /app
 
+# نسخ المتطلبات وتثبيتها
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
+# نسخ باقي الملفات
 COPY . .
 
+# عند التشغيل، بافتراض Akash يطبق ulimit
 CMD ["python", "bot.py"]

@@ -1,17 +1,17 @@
-version: "1.0"
+version: "2.0"
 
 services:
   bottrading:
-    image: ahmadoustoura/bottrading:v1
+    image: ahmadoustoura/bottrading:v2
     command: ["python", "bot.py"]
     env:
-      - name: ULIMIT_NOFILE
-        value: "65536:65536"
-    parameters:
-      storage:
-        - name: data
-          mount: /app/data
-          readOnly: false
+      - name: PYTHONUNBUFFERED
+        value: "1"
+    expose:
+      - port: 80
+        as: 80
+        to:
+          - global: true
 
 profiles:
   compute:
@@ -29,9 +29,11 @@ profiles:
 
   placement:
     bottrading:
-      cluster:
-        match:
-          region: akash
+      pricing:
+        amount: 5000
+        denom: uakt
+      constraints:
+        - region == worldwide
 
 deployment:
   bottrading:

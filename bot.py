@@ -1,3 +1,4 @@
+# -*- coding: utf-8 -*-
 import os
 import hashlib
 import time
@@ -205,8 +206,7 @@ class TradingBot:
                     self.shutdown_bot(reason=f"فشل حرج في تحميل النماذج: {str(emergency_error)}")
                     raise RuntimeError(f"لا يمكن المتابعة بدون نموذج لـ {symbol}") from emergency_error
 
-    @staticmethod
-    def adjust_system_limits(logger):
+    def adjust_system_limits(self):
         """ضبط حدود النظام عند بدء التشغيل"""
         try:
             _, hard = resource.getrlimit(resource.RLIMIT_NOFILE)
@@ -4323,7 +4323,7 @@ if __name__ == "__main__":
                 continue
 
             except Exception as e:
-                error_msg = f"فشل إرسال غ�ر متوقع (المحاولة {attempt + 1}): {str(e)}"
+                error_msg = f"فشل إرسال غير متوقع (المحاولة {attempt + 1}): {str(e)}"
                 self._log_error(error_msg)
                 if attempt == max_retries - 1:
                     self._emergency_log_notification('send_failure', error_msg)
