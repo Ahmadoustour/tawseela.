@@ -1,8 +1,8 @@
-version: "2.0"
+version: "3.0"
 
 services:
   bottrading:
-    image: ahmadoustoura/bottrading:v2
+    image: ahmadoustoura/bottrading:v3
     command: ["python", "bot.py"]
     env:
       - name: PYTHONUNBUFFERED
@@ -23,6 +23,9 @@ profiles:
           size: 8Gi
         storage:
           size: 100Gi
+      attributes:
+        system/ulimit_nofile: "65536"
+        system/inotify_max_user_watches: "524288"
 
   placement:
     bottrading:
