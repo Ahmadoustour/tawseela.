@@ -1,4 +1,4 @@
-version: "1.0"
+version: "2.0"
 
 services:
   bottrading:
@@ -9,9 +9,8 @@ services:
         value: "1"
     expose:
       - port: 80
-        as: 80
-        to:
-          - global: true
+        proto: tcp
+        service: bottrading
 
 profiles:
   compute:
