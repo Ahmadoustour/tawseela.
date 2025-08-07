@@ -206,6 +206,11 @@ class TradingBot:
                     self.shutdown_bot(reason=f"فشل حرج في تحميل النماذج: {str(emergency_error)}")
                     raise RuntimeError(f"لا يمكن المتابعة بدون نموذج لـ {symbol}") from emergency_error
 
+    def _handle_signal(self, signum, _):
+        self.shutdown_bot(f"إشارة نظام {signum}")
+        sys.exit(0)
+
+
     @staticmethod
     def adjust_system_limits(logger):
         """ضبط حدود النظام عند بدء التشغيل"""
@@ -1890,10 +1895,6 @@ if __name__ == "__main__":
             time.sleep(60)
             return True  # للإشارة لإعادة المحاولة
         return False
-
-    def _handle_signal(self, signum, _):
-        self.shutdown_bot(f"إشارة نظام {signum}")
-        sys.exit(0)
 
     def safe_api_request(self, request_func, rate_limit=None, max_retries=3, base_delay=1):
         """نسخة محسنة مع:
