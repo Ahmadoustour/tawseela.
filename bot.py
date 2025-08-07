@@ -58,7 +58,7 @@ class APIError(Exception):
     def __init__(self, message, status_code=None):
         self.status_code = status_code
         super().__init__(message)
-#
+
 class APIConnectionError(Exception):
     def __init__(self, message, original_exception=None):
         self.original = original_exception
@@ -100,7 +100,6 @@ class TradingBot:
         self.ROTATION_INDEX_FILE = 'rotation_index.json'
         self.TWEET_FIELDS_KEY = 'tweet.fields'
         self.OBJECTIVE_BINARY = 'binary:logistic'
-        self.adjust_system_limits()
         self.STATE_FILE = 'state.json'
 
         # تهيئة القواميس الخاصة بالتحليل والإشارات
@@ -130,6 +129,7 @@ class TradingBot:
 
         # تهيئة نظام التسجيل
         self._init_logging()
+        self.adjust_system_limits(self.logger)
 
         # تهيئة APIs
         try:
@@ -206,16 +206,17 @@ class TradingBot:
                     self.shutdown_bot(reason=f"فشل حرج في تحميل النماذج: {str(emergency_error)}")
                     raise RuntimeError(f"لا يمكن المتابعة بدون نموذج لـ {symbol}") from emergency_error
 
-    def adjust_system_limits(self):
+    @staticmethod
+    def adjust_system_limits(logger):
         """ضبط حدود النظام عند بدء التشغيل"""
         try:
             _, hard = resource.getrlimit(resource.RLIMIT_NOFILE)
             new_soft = min(65536, hard)
             resource.setrlimit(resource.RLIMIT_NOFILE, (new_soft, hard))
             
-            logger.info(f"حدود الملفات المفتوحة: Soft={new_soft}, Hard={hard}")
+            logger.info("حدود الملفات المفتوحة: Soft=%s, Hard=%s", new_soft, hard)
         except Exception as e:
-            logger.error(f"فشل في ضبط حدود النظام: {str(e)}")
+            logger.error("فشل في ضبط حدود النظام: %s", e)
 
 
 if __name__ == "__main__":
@@ -239,7 +240,7 @@ if __name__ == "__main__":
             time.sleep(1)
             
     except Exception as e:
-        logger.critical(f"فشل تشغيل البوت: {str(e)}", exc_info=True)
+        logger.critical("فشل تشغيل البوت: %s", e, exc_info=True)
         if 'bot' in locals():
             bot.shutdown_bot(reason=f"خطأ تشغيل: {str(e)}")
         sys.exit(1)
@@ -1965,7 +1966,7 @@ if __name__ == "__main__":
                 return response
             except Exception as e:
                 if logger:
-                    logger.warning(f"📛 محاولة {attempt+1} فشلت: {str(e)}")
+                    logger.warning("📛 محاولة %d فشلت: %s", attempt + 1, e)
                 else:
                     print(f"📛 محاولة {attempt+1} فشلت: {str(e)}")
                 if attempt == max_retries - 1:
