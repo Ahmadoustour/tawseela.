@@ -206,82 +206,6 @@ class TradingBot:
                     self.shutdown_bot(reason=f"فشل حرج في تحميل النماذج: {str(emergency_error)}")
                     raise RuntimeError(f"لا يمكن المتابعة بدون نموذج لـ {symbol}") from emergency_error
 
-    def _handle_signal(self, signum, _):
-        self.shutdown_bot(f"إشارة نظام {signum}")
-        sys.exit(0)
-
-
-    @staticmethod
-    def adjust_system_limits(logger):
-        """ضبط حدود النظام عند بدء التشغيل"""
-        try:
-            _, hard = resource.getrlimit(resource.RLIMIT_NOFILE)
-            new_soft = min(65536, hard)
-            resource.setrlimit(resource.RLIMIT_NOFILE, (new_soft, hard))
-            
-            logger.info("حدود الملفات المفتوحة: Soft=%s, Hard=%s", new_soft, hard)
-        except Exception as e:
-            logger.error("فشل في ضبط حدود النظام: %s", e)
-
-
-if __name__ == "__main__":
-    # إنشاء logger مؤقت إذا لم يكن موجوداً
-    logging.basicConfig(level=logging.INFO)
-    logger = logging.getLogger(__name__)
-    
-    try:
-        # ضبط الحدود أولاً
-        TradingBot.adjust_system_limits(logger)
-        
-        # ثم تشغيل البوت
-        bot = TradingBot()
-        bot.start_bot()
-        
-        # تشغيل الجدولة
-        bot.start_scheduler()
-        
-        # الحفاظ على البرنامج يعمل
-        while bot.is_running:
-            time.sleep(1)
-            
-    except Exception as e:
-        logger.critical("فشل تشغيل البوت: %s", e, exc_info=True)
-        if 'bot' in locals():
-            bot.shutdown_bot(reason=f"خطأ تشغيل: {str(e)}")
-        sys.exit(1)
-
-    def initialize_fallback_model(self):
-        """إنشاء نموذج بديل أساسي في حال فشل التحميل"""
-        try:
-            model = Pipeline([
-                ('scaler', StandardScaler()),
-                ('xgb', XGBClassifier(
-                    objective=self.OBJECTIVE_BINARY,
-                    learning_rate=0.05,
-                    max_depth=3,
-                    n_estimators=100,
-                    random_state=42
-                ))
-            ], memory=self.memory)
-
-            rng = np.random.default_rng(42)  # تعيين seed ثابت
-            dummy_x = pd.DataFrame(
-                rng.random((10, 7)),
-                columns=[
-                    'ema20', 'ema50', 'rsi', 'macd',
-                    'volume', 'news_sentiment', 'signal_count'
-                ]
-            )
-            dummy_y = rng.integers(0, 2, size=10)
-
-            model.fit(dummy_x, dummy_y)
-
-            return model
-
-        except Exception as e:
-            print(f"فشل إنشاء نموذج بديل: {e}")
-            raise RuntimeError("لا يمكن إنشاء نموذج بديل") from e
-
     def _init_logging(self):
         # تنظيف أي handlers موجودة مسبقاً
         if hasattr(self, 'logger') and self.logger.handlers:
@@ -365,6 +289,84 @@ if __name__ == "__main__":
                 with open('crash_report.log', 'a', encoding='utf-8') as f:
                     f.write(f"[{datetime.now()}] SYSTEM COLLAPSE: {str(e)}\n")
                     f.write(f"[{datetime.now()}] EMERGENCY FAILURE: {str(nested_ex)}\n")
+
+    def _handle_signal(self, signum, _):
+        self.shutdown_bot(f"إشارة نظام {signum}")
+        sys.exit(0)
+
+
+    @staticmethod
+    def adjust_system_limits(logger):
+        """ضبط حدود النظام عند بدء التشغيل"""
+        try:
+            _, hard = resource.getrlimit(resource.RLIMIT_NOFILE)
+            new_soft = min(65536, hard)
+            resource.setrlimit(resource.RLIMIT_NOFILE, (new_soft, hard))
+            
+            logger.info("حدود الملفات المفتوحة: Soft=%s, Hard=%s", new_soft, hard)
+        except Exception as e:
+            logger.error("فشل في ضبط حدود النظام: %s", e)
+
+
+if __name__ == "__main__":
+    # إنشاء logger مؤقت إذا لم يكن موجوداً
+    logging.basicConfig(level=logging.INFO)
+    logger = logging.getLogger(__name__)
+    
+    try:
+        # ضبط الحدود أولاً
+        TradingBot.adjust_system_limits(logger)
+        
+        # ثم تشغيل البوت
+        bot = TradingBot()
+        bot.start_bot()
+        
+        # تشغيل الجدولة
+        bot.start_scheduler()
+        
+        # الحفاظ على البرنامج يعمل
+        while bot.is_running:
+            time.sleep(1)
+            
+    except Exception as e:
+        logger.critical("فشل تشغيل البوت: %s", e, exc_info=True)
+        if 'bot' in locals():
+            bot.shutdown_bot(reason=f"خطأ تشغيل: {str(e)}")
+        sys.exit(1)
+
+    def initialize_fallback_model(self):
+        """إنشاء نموذج بديل أساسي في حال فشل التحميل"""
+        try:
+            model = Pipeline([
+                ('scaler', StandardScaler()),
+                ('xgb', XGBClassifier(
+                    objective=self.OBJECTIVE_BINARY,
+                    learning_rate=0.05,
+                    max_depth=3,
+                    n_estimators=100,
+                    random_state=42
+                ))
+            ], memory=self.memory)
+
+            rng = np.random.default_rng(42)  # تعيين seed ثابت
+            dummy_x = pd.DataFrame(
+                rng.random((10, 7)),
+                columns=[
+                    'ema20', 'ema50', 'rsi', 'macd',
+                    'volume', 'news_sentiment', 'signal_count'
+                ]
+            )
+            dummy_y = rng.integers(0, 2, size=10)
+
+            model.fit(dummy_x, dummy_y)
+
+            return model
+
+        except Exception as e:
+            print(f"فشل إنشاء نموذج بديل: {e}")
+            raise RuntimeError("لا يمكن إنشاء نموذج بديل") from e
+
+
         
     def _clean_model_cache(self):
         while len(self._model_cache) > self._max_cached_models:
