@@ -77,6 +77,9 @@ class InvalidResponseError(APIError):
     """استجابة غير صالحة"""
     
 class TradingBot:
+    def _handle_signal(self, signum, _):
+        self.shutdown_bot(f"إشارة نظام {signum}")
+        sys.exit(0)
 
     def __init__(self):
         # تهيئة جميع السمات الأساسية أولاً
@@ -289,11 +292,6 @@ class TradingBot:
                 with open('crash_report.log', 'a', encoding='utf-8') as f:
                     f.write(f"[{datetime.now()}] SYSTEM COLLAPSE: {str(e)}\n")
                     f.write(f"[{datetime.now()}] EMERGENCY FAILURE: {str(nested_ex)}\n")
-
-    def _handle_signal(self, signum, _):
-        self.shutdown_bot(f"إشارة نظام {signum}")
-        sys.exit(0)
-
 
     @staticmethod
     def adjust_system_limits(logger):
