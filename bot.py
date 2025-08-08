@@ -81,6 +81,90 @@ class TradingBot:
         self.shutdown_bot(f"إشارة نظام {signum}")
         sys.exit(0)
 
+    def _init_logging(self):
+        # تنظيف أي handlers موجودة مسبقاً
+        if hasattr(self, 'logger') and self.logger.handlers:
+            for handler in self.logger.handlers[:]:
+                handler.close()
+                self.logger.removeHandler(handler)
+
+# إعداد نظام تسجيل الأخطاء الآمن مع تجنب التعارض في الملفات
+        try:
+            # 1. إنشاء مجلد اللوجات إذا لم يكن موجوداً
+            logs_dir = 'logs'
+            os.makedirs(logs_dir, exist_ok=True)
+
+            # 2. إنشاء اسم فريد لل logger مع تجنب التعارض
+            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+            logger_name = f'trading_bot_{timestamp}'
+            
+            # 3. التحقق من عدم وجود ملف بنفس الاسم (حماية إضافية)
+            log_file = f'{logs_dir}/bot_{datetime.now().strftime("%Y%m%d")}.log'
+            counter = 1
+            while os.path.exists(log_file):
+                log_file = f'{logs_dir}/bot_{datetime.now().strftime("%Y%m%d")}_{counter}.log'
+                counter += 1
+
+            # 4. إنشاء logger جديد
+            self.logger = logging.getLogger(logger_name)
+            self.logger.setLevel(logging.DEBUG)
+
+            # 5. منع تكرار ال handlers
+            if self.logger.hasHandlers():
+                self.logger.handlers.clear()
+
+            # 6. إنشاء formatter متقدم
+            formatter = logging.Formatter(
+                '%(asctime)s | %(levelname)-8s | %(name)s | %(message)s | Line:%(lineno)d',
+                datefmt='%Y-%m-%d %H:%M:%S'
+            )
+
+            # 7. إنشاء file handler مع تدوير الملفات
+            file_handler = RotatingFileHandler(
+                log_file,
+                maxBytes=5*1024*1024,  # 5MB
+                backupCount=3,
+                encoding='utf-8'
+            )
+            file_handler.setFormatter(formatter)
+            self.logger.addHandler(file_handler)
+
+            # 8. إنشاء console handler للطوارئ
+            console_handler = logging.StreamHandler()
+            console_handler.setFormatter(formatter)
+            self.logger.addHandler(console_handler)
+
+            # 9. تسجيل بدء التشغيل
+            self.logger.info("✅ تم تهيئة نظام التسجيل بنجاح")
+
+        except Exception as e:
+            # نظام الطوارئ عند فشل تهيئة نظام التسجيل
+            try:
+                # أ. تهيئة أساسيات logging
+                logging.basicConfig(
+                    level=logging.DEBUG,
+                    format='%(asctime)s - EMERGENCY - %(message)s',
+                    handlers=[
+                        logging.StreamHandler(),  # إخراج إلى الكونسول
+                        logging.FileHandler('emergency.log', encoding='utf-8')  # ملف طوارئ منفصل
+                    ]
+                )
+
+                # ب. إنشاء logger الطوارئ
+                emergency_logger = logging.getLogger('EMERGENCY_LOGGER')
+                emergency_logger.setLevel(logging.DEBUG)
+
+                # ج. تسجيل التفاصيل الكاملة للخطأ
+                emergency_logger.critical("فشل تهيئة نظام التسجيل الرئيسي | الخطأ: %s", str(e), exc_info=True)
+                # د. تعيين logger الطوارئ للنظام
+                self.logger = emergency_logger
+
+            except Exception as nested_ex:
+                # أبسط حل كحماية أخيرة
+                with open('crash_report.log', 'a', encoding='utf-8') as f:
+                    f.write(f"[{datetime.now()}] SYSTEM COLLAPSE: {str(e)}\n")
+                    f.write(f"[{datetime.now()}] EMERGENCY FAILURE: {str(nested_ex)}\n")
+
     def __init__(self):
         # تهيئة جميع السمات الأساسية أولاً
         self.lock = Lock()
@@ -209,90 +293,6 @@ class TradingBot:
                     self.shutdown_bot(reason=f"فشل حرج في تحميل النماذج: {str(emergency_error)}")
                     raise RuntimeError(f"لا يمكن المتابعة بدون نموذج لـ {symbol}") from emergency_error
 
-    def _init_logging(self):
-        # تنظيف أي handlers موجودة مسبقاً
-        if hasattr(self, 'logger') and self.logger.handlers:
-            for handler in self.logger.handlers[:]:
-                handler.close()
-                self.logger.removeHandler(handler)
-
-# إعداد نظام تسجيل الأخطاء الآمن مع تجنب التعارض في الملفات
-        try:
-            # 1. إنشاء مجلد اللوجات إذا لم يكن موجوداً
-            logs_dir = 'logs'
-            os.makedirs(logs_dir, exist_ok=True)
-
-            # 2. إنشاء اسم فريد لل logger مع تجنب التعارض
-            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-            logger_name = f'trading_bot_{timestamp}'
-            
-            # 3. التحقق من عدم وجود ملف بنفس الاسم (حماية إضافية)
-            log_file = f'{logs_dir}/bot_{datetime.now().strftime("%Y%m%d")}.log'
-            counter = 1
-            while os.path.exists(log_file):
-                log_file = f'{logs_dir}/bot_{datetime.now().strftime("%Y%m%d")}_{counter}.log'
-                counter += 1
-
-            # 4. إنشاء logger جديد
-            self.logger = logging.getLogger(logger_name)
-            self.logger.setLevel(logging.DEBUG)
-
-            # 5. منع تكرار ال handlers
-            if self.logger.hasHandlers():
-                self.logger.handlers.clear()
-
-            # 6. إنشاء formatter متقدم
-            formatter = logging.Formatter(
-                '%(asctime)s | %(levelname)-8s | %(name)s | %(message)s | Line:%(lineno)d',
-                datefmt='%Y-%m-%d %H:%M:%S'
-            )
-
-            # 7. إنشاء file handler مع تدوير الملفات
-            file_handler = RotatingFileHandler(
-                log_file,
-                maxBytes=5*1024*1024,  # 5MB
-                backupCount=3,
-                encoding='utf-8'
-            )
-            file_handler.setFormatter(formatter)
-            self.logger.addHandler(file_handler)
-
-            # 8. إنشاء console handler للطوارئ
-            console_handler = logging.StreamHandler()
-            console_handler.setFormatter(formatter)
-            self.logger.addHandler(console_handler)
-
-            # 9. تسجيل بدء التشغيل
-            self.logger.info("✅ تم تهيئة نظام التسجيل بنجاح")
-
-        except Exception as e:
-            # نظام الطوارئ عند فشل تهيئة نظام التسجيل
-            try:
-                # أ. تهيئة أساسيات logging
-                logging.basicConfig(
-                    level=logging.DEBUG,
-                    format='%(asctime)s - EMERGENCY - %(message)s',
-                    handlers=[
-                        logging.StreamHandler(),  # إخراج إلى الكونسول
-                        logging.FileHandler('emergency.log', encoding='utf-8')  # ملف طوارئ منفصل
-                    ]
-                )
-
-                # ب. إنشاء logger الطوارئ
-                emergency_logger = logging.getLogger('EMERGENCY_LOGGER')
-                emergency_logger.setLevel(logging.DEBUG)
-
-                # ج. تسجيل التفاصيل الكاملة للخطأ
-                emergency_logger.critical("فشل تهيئة نظام التسجيل الرئيسي | الخطأ: %s", str(e), exc_info=True)
-                # د. تعيين logger الطوارئ للنظام
-                self.logger = emergency_logger
-
-            except Exception as nested_ex:
-                # أبسط حل كحماية أخيرة
-                with open('crash_report.log', 'a', encoding='utf-8') as f:
-                    f.write(f"[{datetime.now()}] SYSTEM COLLAPSE: {str(e)}\n")
-                    f.write(f"[{datetime.now()}] EMERGENCY FAILURE: {str(nested_ex)}\n")
-
     @staticmethod
     def adjust_system_limits(logger):
         """ضبط حدود النظام عند بدء التشغيل"""
@@ -304,33 +304,6 @@ class TradingBot:
             logger.info("حدود الملفات المفتوحة: Soft=%s, Hard=%s", new_soft, hard)
         except Exception as e:
             logger.error("فشل في ضبط حدود النظام: %s", e)
-
-
-if __name__ == "__main__":
-    # إنشاء logger مؤقت إذا لم يكن موجوداً
-    logging.basicConfig(level=logging.INFO)
-    logger = logging.getLogger(__name__)
-    
-    try:
-        # ضبط الحدود أولاً
-        TradingBot.adjust_system_limits(logger)
-        
-        # ثم تشغيل البوت
-        bot = TradingBot()
-        bot.start_bot()
-        
-        # تشغيل الجدولة
-        bot.start_scheduler()
-        
-        # الحفاظ على البرنامج يعمل
-        while bot.is_running:
-            time.sleep(1)
-            
-    except Exception as e:
-        logger.critical("فشل تشغيل البوت: %s", e, exc_info=True)
-        if 'bot' in locals():
-            bot.shutdown_bot(reason=f"خطأ تشغيل: {str(e)}")
-        sys.exit(1)
 
     def initialize_fallback_model(self):
         """إنشاء نموذج بديل أساسي في حال فشل التحميل"""
@@ -4468,3 +4441,22 @@ if __name__ == "__main__":
         except Exception as e:
             self.logger.error("انهيار في دالة run: %s", str(e), exc_info=True)
             self.shutdown_bot(reason=f"خطأ حرج: {type(e).__name__}")
+            
+if __name__ == "__main__":
+    # إنشاء logger مؤقت إذا لم يكن موجوداً
+    logging.basicConfig(level=logging.INFO)
+    logger = logging.getLogger(__name__)
+    
+    try:
+        # ضبط الحدود أولاً
+        TradingBot.adjust_system_limits(logger)
+        
+        # ثم تشغيل البوت
+        bot = TradingBot()
+        bot.run()  # التغيير هنا: استبدال start_bot() بـ run() مباشرة
+        
+    except Exception as e:
+        logger.critical("فشل تشغيل البوت: %s", e, exc_info=True)
+        if 'bot' in locals():
+            bot.shutdown_bot(reason=f"خطأ تشغيل: {str(e)}")
+        sys.exit(1)
