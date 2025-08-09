@@ -2,8 +2,11 @@ version: "2.0"
 
 services:
   bottrading:
-    image: ahmadoustoura/bottrading:v2
-    command: ["python", "bot.py"]
+    image: ahmadoustoura/bottrading:v1
+    command:
+      - /bin/sh
+      - -c
+      - "ulimit -n 65536 && sysctl -w fs.inotify.max_user_watches=524288 && python bot.py"
     env:
       - name: PYTHONUNBUFFERED
         value: "1"
